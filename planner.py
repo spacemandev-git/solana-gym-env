@@ -1,23 +1,27 @@
 import os
 import logging
-from openai import OpenAI
+import json
+import requests
+from dotenv import load_dotenv
 from skill_manager.ts_skill_manager import TypeScriptSkillManager
 from typing import Dict, Any, Optional
 
-# It's good practice to use environment variables for API keys
-# Ensure you have OPENAI_API_KEY set in your environment
-# client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-client = None # Disabled for now
+# Load environment variables
+load_dotenv()
 
 class LLMPlanner:
     """
-    This class interfaces with a large language model (LLM) to generate
+    This class interfaces with OpenRouter LLM API to generate
     TypeScript code for new skills based on the current environment observation,
     existing skills, and a high-level objective.
     """
-    def __init__(self, skill_manager: TypeScriptSkillManager, model: str = "gpt-4-1106-preview"):
+    def __init__(self, skill_manager: TypeScriptSkillManager, model: str = None):
         self.skill_manager = skill_manager
-        self.model = model
+        self.model = model or os.environ.get("OPENROUTER_MODEL", "google/gemini-2.0-flash-exp:free")
+        self.api_key = os.environ.get("OPENROUTER_API_KEY")
+        
+        if not self.api_key:
+            logging.warning("LLMPlanner: OPENROUTER_API_KEY not found in environment. Skill generation will use dummy skills.")
 
     def _generate_prompt(
         self,
@@ -43,6 +47,9 @@ The function must return a Promise that resolves to a tuple: `[number, string, s
 - Second element: A short string explaining the outcome (e.g., "success", "insufficient_funds").
 - Third element: A JSON string of the transaction receipt, or null if no transaction was made.
 
+The env object provides:
+- `env.simulateTransaction(success: boolean, protocol?: string)`: Simulates a transaction and returns a receipt JSON string
+
 **Environment Observation:**
 ```json
 {observation}
@@ -67,8 +74,53 @@ The last generated skill failed with the following error. Please analyze the err
 Write the complete TypeScript code for the `executeSkill` function.
 Do not include any other code or explanations outside of the TypeScript code block.
 The code should be self-contained and ready to be executed.
+Focus on interacting with Solana protocols like Jupiter, Meteora, Raydium, etc.
 """
         return prompt
+
+    def _call_openrouter(self, prompt: str) -> Optional[str]:
+        """Makes a request to the OpenRouter API."""
+        if not self.api_key:
+            return None
+            
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        
+        site_url = os.environ.get("OPENROUTER_SITE_URL", "")
+        app_name = os.environ.get("OPENROUTER_APP_NAME", "solana-gym")
+        
+        if site_url:
+            headers["HTTP-Referer"] = site_url
+        if app_name:
+            headers["X-Title"] = app_name
+        
+        data = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7,
+        }
+        
+        try:
+            response = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=data
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            return result['choices'][0]['message']['content']
+            
+        except requests.exceptions.RequestException as e:
+            logging.error(f"LLMPlanner: Error calling OpenRouter API: {e}")
+            if hasattr(e.response, 'text'):
+                logging.error(f"Response: {e.response.text}")
+            return None
+        except (KeyError, json.JSONDecodeError) as e:
+            logging.error(f"LLMPlanner: Error parsing OpenRouter response: {e}")
+            return None
 
     def propose(
         self,
@@ -79,31 +131,28 @@ The code should be self-contained and ready to be executed.
         """
         Proposes a new skill by querying the LLM.
         """
-        if not client:
-            logging.warning("LLMPlanner: OpenAI client not configured. Returning a dummy skill.")
-            return self._get_dummy_skill()
-
         prompt = self._generate_prompt(observation, objective, error)
         
-        try:
-            logging.info("LLMPlanner: Querying LLM for a new skill...")
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-            )
-            
-            skill_code = response.choices[0].message.content
-            if skill_code.startswith("```typescript"):
-                skill_code = skill_code[len("```typescript"):].strip()
-            if skill_code.endswith("```"):
-                skill_code = skill_code[:-len("```")].strip()
-                
+        logging.info(f"LLMPlanner: Querying {self.model} for a new skill...")
+        skill_code = self._call_openrouter(prompt)
+        
+        if skill_code:
+            # Extract code from markdown if present
+            if "```typescript" in skill_code:
+                start = skill_code.find("```typescript") + len("```typescript")
+                end = skill_code.find("```", start)
+                if end != -1:
+                    skill_code = skill_code[start:end].strip()
+            elif "```" in skill_code:
+                start = skill_code.find("```") + len("```")
+                end = skill_code.find("```", start)
+                if end != -1:
+                    skill_code = skill_code[start:end].strip()
+                    
             logging.info("LLMPlanner: Received skill proposal from LLM.")
             return skill_code
-            
-        except Exception as e:
-            logging.error(f"LLMPlanner: Error querying LLM: {e}", exc_info=True)
+        else:
+            logging.warning("LLMPlanner: Failed to get response from OpenRouter. Returning a dummy skill.")
             return self._get_dummy_skill()
 
     def _get_dummy_skill(self) -> str:
@@ -118,7 +167,7 @@ export async function executeSkill(env: any): Promise<[number, string, string | 
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(message)s')
-    skill_manager = TypeScriptSkillManager(skills_dir="./temp_skills_planner")
+    skill_manager = TypeScriptSkillManager(skill_root="./temp_skills_planner")
     planner = LLMPlanner(skill_manager)
     
     mock_observation = {"wallet_balances": [1.0], "block_height": [100]}

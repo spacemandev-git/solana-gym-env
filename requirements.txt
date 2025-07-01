@@ -1,2 +1,4 @@
 gymnasium
 solana
+python-dotenv
+requests

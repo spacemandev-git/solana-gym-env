@@ -122,3 +122,7 @@ Skills are executed in the `skill_runner` environment which provides mocked Sola
 - `skill_runner/runSkill.ts`: TypeScript execution environment
 - `tests/python/test_voyager_env.py`: Example usage patterns
 - `.clinerules/01-project.md`: Critical project rules and migration guidelines
+
+## AI Model Considerations
+
+- Use OpenRouter when possible over other providers to make it easy to swap out mode
