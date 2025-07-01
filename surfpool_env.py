@@ -2,10 +2,15 @@ import gymnasium as gym
 import numpy as np
 import subprocess
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 import json
 from typing import Optional, Callable, Set
-from clean_logging import setup_clean_logging
+from pathlib import Path
+import shutil
+import os
+import signal
+
 
 from gymnasium import spaces
 from solana.rpc.api import Client as RpcClient
@@ -17,12 +22,66 @@ from solders.message import MessageV0
 from solders.hash import Hash
 from solders.pubkey import Pubkey
 
-setup_clean_logging()
-
 # TODO: These should be configured based on the specific protocols and tokens
 MAX_TOKENS = 10  # Maximum number of different tokens in the wallet
 NUM_PROTOCOLS = 20 # Number of known protocols the agent can interact with
 MAX_INSTRUCTIONS_PER_PROTOCOL = 5 # Max instructions per protocol
+
+READY_TOKEN = b"Connection established."          # surfpool prints this when ready
+# ──────────────────────────────────────────────────────────────────────────
+#  Async context-manager that owns the Surfpool process life-cycle
+# ──────────────────────────────────────────────────────────────────────────
+@asynccontextmanager
+async def _surfpool_validator(rpc_url: str, *, backtrace: bool = True):
+    """
+    Async context manager that:
+      • launches `surfpool start -u <rpc_url>`
+      • waits until it prints the READY_TOKEN
+      • yields the process object while the validator is live
+      • always terminates the whole process-group on exit
+    """
+    if shutil.which("surfpool") is None:
+        raise FileNotFoundError(
+            "'surfpool' not found in PATH; install it or adjust PATH."
+        )
+
+    env = os.environ.copy()
+    if backtrace:
+        env["RUST_BACKTRACE"] = "1"
+    # Disable raw-mode attempts in many TTY crates (crossterm/termion)
+    env["CROSSTERM_DISABLE_RAW_MODE"] = "1"
+
+    cmd = ["surfpool", "start", "--no-tui", "-u", rpc_url]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,        # own pgid → easy to kill
+        env=env,
+    )
+    logging.info("surfpool [%s] launched", proc.pid)
+
+    try:
+        # Block until Surfpool is actually serving RPC or abort early
+        while True:
+            line = await proc.stdout.readline()
+            if not line:                       # died before ready
+                raise RuntimeError("surfpool exited before becoming ready")
+            logging.debug("[surfpool] %s", line.decode().rstrip())
+            if READY_TOKEN in line:
+                break
+        yield proc                             # ── control goes back to caller
+    finally:
+        if proc.returncode is None:
+            logging.info("Stopping surfpool [%s] …", proc.pid)
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=8)
+            except asyncio.TimeoutError:
+                logging.warning("surfpool unresponsive; killing")
+                os.killpg(proc.pid, signal.SIGKILL)
+                await proc.wait()
+        logging.info("surfpool shut down")
 
 class SurfpoolEnv(gym.Env):
     """
@@ -64,58 +123,65 @@ class SurfpoolEnv(gym.Env):
         self.action_space = spaces.Discrete(1)
         self.last_observation = None
         self.last_tx_receipt = None
+        self._validator_cm = None       # will hold the context-manager
+        self._validator_proc = None     # the running subprocess.Process
 
 
     def _start_test_validator(self):
-        logging.info("Starting Solana test validator via surfpool...")
-        try:
-            command = ['surfpool', 'start', '-u', self.rpc_url]
-            # Redirect stdout and stderr to DEVNULL to prevent ResourceWarning
-            self.test_validator_process = subprocess.Popen(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            logging.info("Surfpool process started.")
-        except FileNotFoundError:
-            logging.error("Error: 'surfpool' command not found. Please ensure it's installed and in your PATH.")
-            self.test_validator_process = None
-        except Exception as e:
-            logging.error(f"Error starting test validator: {e}", exc_info=True)
-            self.test_validator_process = None
+        pass
+        # logging.info("Starting Solana test validator via surfpool...")
+        # try:
+        #     command = ['surfpool', 'start', '-u', self.rpc_url]
+        #     # Redirect stdout and stderr to DEVNULL to prevent ResourceWarning
+        #     self.test_validator_process = subprocess.Popen(
+        #         command,
+        #         stdout=subprocess.PIPE,
+        #         stderr=subprocess.STDOUT,
+        #     )
+        #     logging.info("Surfpool process started.")
+        # except FileNotFoundError:
+        #     logging.error("Error: 'surfpool' command not found. Please ensure it's installed and in your PATH.")
+        #     self.test_validator_process = None
+        # except Exception as e:
+        #     logging.error(f"Error starting test validator: {e}", exc_info=True)
+        #     self.test_validator_process = None
 
     async def _wait_for_validator(self):
-        """Polls the RPC endpoint until it's responsive."""
-        logging.info("Waiting for validator to start...")
-        for i in range(60):  # 60 seconds timeout
-            try:
-                await self.client.get_block(0)
-                logging.info("Validator is healthy.")
-                return
-            except Exception:
-                await asyncio.sleep(1)
-        raise RuntimeError("Validator did not start in time.")
+        pass
+        # """Polls the RPC endpoint until it's responsive."""
+        # logging.info("Waiting for validator to start...")
+        # for i in range(60):  # 60 seconds timeout
+        #     try:
+        #         await self.client.get_block(0)
+        #         logging.info("Validator is healthy.")
+        #         return
+        #     except Exception:
+        #         await asyncio.sleep(1)
+        # raise RuntimeError("Validator did not start in time.")
 
     def _stop_test_validator(self):
-        if self.test_validator_process and self.test_validator_process.poll() is None:
-            logging.info("Stopping Solana test validator...")
-            try:
-                self.test_validator_process.terminate()
-                try:
-                    # Reduce timeout for faster test runs
-                    self.test_validator_process.wait(timeout=2)
-                    logging.info("Validator process terminated gracefully.")
-                except subprocess.TimeoutExpired:
-                    logging.warning("Validator process did not terminate in time, killing it.")
-                    self.test_validator_process.kill()
-                    self.test_validator_process.wait()
-                    logging.info("Validator process killed.")
-            except Exception as e:
-                logging.error(f"An error occurred while stopping the validator: {e}", exc_info=True)
-                if self.test_validator_process.poll() is None:
-                    self.test_validator_process.kill()
-                    self.test_validator_process.wait()
-            self.test_validator_process = None
+        # if self._validator_cm:
+        #     await self._validator_cm.__aexit__(None, None, None)
+        pass
+        # if self.test_validator_process and self.test_validator_process.poll() is None:
+        #     logging.info("Stopping Solana test validator...")
+        #     try:
+        #         self.test_validator_process.terminate()
+        #         try:
+        #             # Reduce timeout for faster test runs
+        #             self.test_validator_process.wait(timeout=2)
+        #             logging.info("Validator process terminated gracefully.")
+        #         except subprocess.TimeoutExpired:
+        #             logging.warning("Validator process did not terminate in time, killing it.")
+        #             self.test_validator_process.kill()
+        #             self.test_validator_process.wait()
+        #             logging.info("Validator process killed.")
+        #     except Exception as e:
+        #         logging.error(f"An error occurred while stopping the validator: {e}", exc_info=True)
+        #         if self.test_validator_process.poll() is None:
+        #             self.test_validator_process.kill()
+        #             self.test_validator_process.wait()
+        #     self.test_validator_process = None
 
     async def _get_observation(self, last_tx_result=None):
         # In a real implementation, you would fetch this data from the chain
@@ -158,8 +224,16 @@ class SurfpoolEnv(gym.Env):
     async def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         
-        self._stop_test_validator()
-        self._start_test_validator()
+        if self._validator_cm:
+            await self._validator_cm.__aexit__(None, None, None)
+
+        # 2. Launch a fresh validator and wait until it’s live
+        self._validator_cm = _surfpool_validator(self.rpc_url)
+        self._validator_proc = await self._validator_cm.__aenter__()
+        # self._validator_cm = _surfpool_validator(self.rpc_url)
+        # self._validator_proc = await self._validator_cm.__aenter__()
+        # self._stop_test_validator()
+        # self._start_test_validator()
 
         # Wait for the validator to be ready
         await self._wait_for_validator()
@@ -210,6 +284,11 @@ class SurfpoolEnv(gym.Env):
             obs = await self._get_observation()
             # Pass the error in the info dict
             return obs, None, True, {"error": str(e)}
+        except BaseException as e:
+            logging.error(f"Panice in send_transaction: {e}", exc_info=True)
+            obs = await self._get_observation()
+            # Pass the error in the info dict
+            return obs, None, True, {"error": str(e)}
 
         self.last_tx_receipt = tx_receipt
         obs = await self._get_observation(last_tx_result=tx_receipt)
@@ -221,9 +300,16 @@ class SurfpoolEnv(gym.Env):
         pass
 
     async def close(self):
-        self._stop_test_validator()
-        if self.client:
-            await self.client.close()
+        if self._validator_cm:
+            await self._validator_cm.__aexit__(None, None, None)
+            self._validator_cm = self._validator_proc = None
+
+            if self.client:
+                await self.client.close()
+            logging.info("SurfpoolEnv closed.")
+        # self._stop_test_validator()
+        # if self.client:
+        #     await self.client.close()
         logging.info("SurfpoolEnv closed.")
 
 if __name__ == '__main__':

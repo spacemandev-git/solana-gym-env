@@ -11,20 +11,11 @@ from voyager_env import SolanaVoyagerEnv
 
 import io, sys, contextlib, unittest
 
-class _CleanStdout:
-    def write(self, data):
-        for line in data.splitlines(keepends=True):
-            sys.__stdout__.write(textwrap.dedent(line).lstrip())
-    def flush(self): sys.__stdout__.flush()
 
-sys.stdout = sys.stderr = _CleanStdout()
 # --- Test Configuration ---
 # Capture logs to a stream to keep stdout clean
 log_stream = io.StringIO()
 logging.basicConfig(level=logging.INFO, format='%(message)s', stream=log_stream)
-
-# To see logs, comment out the line above and uncomment the line below
-# logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 class TestSolanaVoyagerEnv(unittest.IsolatedAsyncioTestCase):
 
@@ -150,9 +141,5 @@ if __name__ == "__main__":
         print("\n--- LOGS ---")
         log_stream.seek(0)
         print(log_stream.read())
-
-
-if __name__ == "__main__":
-    from clean_logging import setup_clean_logging
-    setup_clean_logging()
+    
     unittest.main()
