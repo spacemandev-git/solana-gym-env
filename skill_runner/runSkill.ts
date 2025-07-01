@@ -33,6 +33,8 @@ const surfpoolEnv = {
         };
         return JSON.stringify(txReceipt);
     },
+    // Mock wallet balances: [SOL, USDC, ...]
+    wallet_balances: [2.5, 100.0, 0.0, 0.0, 0.0],
     // Add other methods as needed to mirror SurfpoolEnv
     read: () => "some data",
     write: (data: string) => console.log(`Skill wrote: ${data}`),
