@@ -43,7 +43,7 @@ class TypeScriptSkillManager:
         return file_path
 
     def execute_skill(self, file_path: str, timeout_ms: int = 10000) -> Dict[str, Any]:
-        command = ["bun", "run", "skill_runner/runSkill.ts", file_path, str(timeout_ms)]
+        command = ["bun", "skill_runner/runSkill.ts", file_path, str(timeout_ms)]
         try:
             result = subprocess.run(
                 command,

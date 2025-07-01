@@ -7,6 +7,9 @@ const execAsync = promisify(exec);
 // Define the expected return type from executeSkill in TS skills
 type SkillExecutionResult = [number, string, string | null]; // [reward, done_reason, tx_receipt_json_string]
 
+// Track transaction count for single transaction enforcement
+let transactionCount = 0;
+
 // A mock environment for the skill to interact with.
 // In a real scenario, this would be a more complex object
 // that mirrors the Python SurfpoolEnv's capabilities.
@@ -16,7 +19,16 @@ const surfpoolEnv = {
     // interact with a Solana test validator or similar.
     // For the purpose of testing skills and returning a receipt,
     // we'll simulate a transaction.
-    simulateTransaction: (success: boolean, protocol: string | null = null) => {
+    simulateTransaction: async (success: boolean = true, protocol: string | null = null) => {
+        transactionCount++;
+        if (transactionCount > 1) {
+            throw new Error(
+                "SINGLE_TRANSACTION_LIMIT: Skills can only execute ONE transaction. " +
+                "To perform multiple operations, create separate skills and chain them. " +
+                "This transaction attempt was blocked."
+            );
+        }
+        
         // Generate a dummy transaction receipt.
         // In a real scenario, this would come from a Solana RPC call.
         const txReceipt = {
@@ -35,6 +47,11 @@ const surfpoolEnv = {
     },
     // Mock wallet balances: [SOL, USDC, ...]
     wallet_balances: [2.5, 100.0, 0.0, 0.0, 0.0],
+    // Add getWallet method for compatibility
+    getWallet: () => ({
+        balances: [2.5, 100.0, 0.0, 0.0, 0.0],
+        publicKey: "mock-wallet-pubkey"
+    }),
     // Add other methods as needed to mirror SurfpoolEnv
     read: () => "some data",
     write: (data: string) => console.log(`Skill wrote: ${data}`),
@@ -50,6 +67,9 @@ async function runSkill(): Promise<void> {
 
     const timeoutMs = parseInt(timeoutMsStr, 10);
     const absolutePath = path.resolve(filePath);
+
+    // Reset transaction counter for each skill execution
+    transactionCount = 0;
 
     try {
         const skillModule = await import(absolutePath);
@@ -73,7 +93,15 @@ async function runSkill(): Promise<void> {
         }));
     } catch (error) {
         const reason = error instanceof Error ? error.message : 'An unknown error occurred.';
-        console.error(JSON.stringify({ success: false, reason }));
+        // For skill execution errors, return a proper error format
+        console.log(JSON.stringify({ 
+            success: false, 
+            reason,
+            reward: 0.0,
+            done_reason: "error",
+            tx_receipt_json_string: null,
+            error: reason
+        }));
         process.exit(1);
     }
 }

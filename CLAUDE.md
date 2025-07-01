@@ -100,6 +100,7 @@ Skills are executed in the `skill_runner` environment which provides mocked Sola
 - Must include one-paragraph description ≤ 80 tokens
 - Must include unit test in `tests/ts/`
 - Must be TypeScript (no new Python skills allowed)
+- **CRITICAL: Each skill MUST execute exactly ONE transaction**. If you need multiple transactions, create separate skills and chain them together. The return type supports only a single transaction receipt (not an array)
 
 ## Important Implementation Notes
 
