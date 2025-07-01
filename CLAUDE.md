@@ -126,3 +126,7 @@ Skills are executed in the `skill_runner` environment which provides mocked Sola
 ## AI Model Considerations
 
 - Use OpenRouter when possible over other providers to make it easy to swap out mode
+
+## Milestones
+
+- Complete milestone 3!
