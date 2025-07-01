@@ -4,7 +4,7 @@ from skill_manager.ts_skill_manager import TypeScriptSkillManager
 
 class TestTypeScriptSkillManager(unittest.TestCase):
     def setUp(self):
-        self.manager = TypeScriptSkillManager(skills_dir="test_skills")
+        self.manager = TypeScriptSkillManager(skill_root="test_skills")
 
     def tearDown(self):
         if os.path.exists(self.manager.skills_dir):
@@ -14,8 +14,8 @@ class TestTypeScriptSkillManager(unittest.TestCase):
 
     def test_save_and_execute_skill(self):
         skill_code = """
-export async function executeSkill(env: any): Promise<{ reason: string; }> {
-    return { reason: "Test skill executed successfully." };
+export async function executeSkill(env: any): Promise<[number, string, string | null]> {
+    return [1.0, "Test skill executed successfully.", null];
 }
 """
         file_path = self.manager.save_skill("test_skill", skill_code)
@@ -23,7 +23,7 @@ export async function executeSkill(env: any): Promise<{ reason: string; }> {
 
         result = self.manager.execute_skill(file_path)
         self.assertTrue(result["success"])
-        self.assertEqual(result["reason"], "Test skill executed successfully.")
+        self.assertEqual(result["done_reason"], "Test skill executed successfully.")
 
 if __name__ == "__main__":
     unittest.main()

@@ -73,7 +73,7 @@ export async function executeSkill(env: any): Promise<[number, string, string | 
             message: {
                 accountKeys: [
                     "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4", // Jupiter
-                    "MeteoRb91wabcB2m8T8T16cfj2hD6yB2a2d7s65", // Meteora
+                    "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo", // Meteora DLMM
                 ],
                 instructions: [
                     { programIdIndex: 0 }, // Jupiter

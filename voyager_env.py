@@ -4,6 +4,7 @@ import os
 import logging
 import traceback
 import json
+import shutil
 from typing import Set, Dict, Any
 
 from surfpool_env import SurfpoolEnv
@@ -72,20 +73,24 @@ class SolanaVoyagerEnv(gym.Env):
         num_actions = len(self.skills) + len(self.SPECIALS)
         self.action_space = gym.spaces.Discrete(num_actions)
 
-    def _protocol_labeler(self, tx_receipt: Dict[str, Any]) -> str | None:
+    def _protocol_labeler(self, tx_receipt: Dict[str, Any]) -> list[str]:
         """
-        Identifies the protocol from a transaction receipt by checking for known
+        Identifies ALL protocols from a transaction receipt by checking for known
         program IDs in the transaction's instructions. This check is performed
         regardless of whether the transaction succeeded or failed.
+        Returns a list of protocol names found in the transaction.
         """
         if not tx_receipt:
-            return None
+            return []
+
+        protocols_found = []
+        seen_protocols = set()  # To avoid duplicates
 
         try:
             # The transaction object contains account keys as strings
             account_keys = tx_receipt.get("transaction", {}).get("message", {}).get("accountKeys", [])
             if not account_keys:
-                return None
+                return []
 
             # The instructions contain indices into the account_keys list
             instructions = tx_receipt.get("transaction", {}).get("message", {}).get("instructions", [])
@@ -95,14 +100,22 @@ class SolanaVoyagerEnv(gym.Env):
                 if program_id_index is not None and program_id_index < len(account_keys):
                     program_id_str = account_keys[program_id_index]
                     if program_id_str in KNOWN_PROGRAM_IDS:
-                        return KNOWN_PROGRAM_IDS[program_id_str]
-                for key in account_keys:
-                    if key in KNOWN_PROGRAM_IDS:
-                        return KNOWN_PROGRAM_IDS[key]
+                        protocol = KNOWN_PROGRAM_IDS[program_id_str]
+                        if protocol not in seen_protocols:
+                            seen_protocols.add(protocol)
+                            protocols_found.append(protocol)
+            
+            # Also check all account keys in case some are program IDs not in instructions
+            for key in account_keys:
+                if key in KNOWN_PROGRAM_IDS:
+                    protocol = KNOWN_PROGRAM_IDS[key]
+                    if protocol not in seen_protocols:
+                        seen_protocols.add(protocol)
+                        protocols_found.append(protocol)
         except Exception as e:
             logging.error(f"Error during protocol labeling: {e}")
 
-        return None
+        return protocols_found
 
     async def _grow_skill(self):
         """
@@ -164,36 +177,36 @@ class SolanaVoyagerEnv(gym.Env):
 
         try:
             result = self.skills.execute_skill(file_path)
-            info["done_reason"] = result.get("reason")
+            info["done_reason"] = result.get("reason", result.get("done_reason"))
             if result.get("success"):
-                base_reward = 1.0 # Base reward for successful skill execution
+                base_reward = result.get("reward", 1.0) # Use reward from skill if provided
             else:
                 base_reward = 0.0 # No base reward for failed skill execution
+            
+            # Get transaction receipt from skill result
+            receipt_str = result.get("tx_receipt_json_string")
         except Exception as e:
             logging.error(f"Error running skill {skill_id}: {e}")
             info["error"] = f"Exception in skill {skill_id}: {e}"
             base_reward = 0.0 # Ensure reward is 0 on failure
+            receipt_str = None
         
         # The final reward includes a voyager-style exploration bonus.
-        # This requires the transaction receipt from the last observation,
-        # which is set by the env.step() call inside the skill.
+        # This requires the transaction receipt from the skill execution.
         final_reward = base_reward
-        # receipt_str = self.solana_env.last_observation
-        # Reset observation to prevent state leakage
-        # self.solana_env.last_observation = None
-
-        receipt_str = self.solana_env.last_tx_receipt
         if receipt_str:
             receipt = json.loads(receipt_str)
-            proto = self._protocol_labeler(receipt)
-            if proto:
-                info["protocol"] = proto
-                if proto not in self.protocols_seen:
-                    logging.info(f"New protocol interaction: {proto}! Adding exploration bonus.")
-                    self.protocols_seen.add(proto)
-                    final_reward += 1.0
-                else:
-                    logging.info(f"Already interacted with {proto}. No bonus.")
+            protocols = self._protocol_labeler(receipt)
+            if protocols:
+                info["protocols_interacted"] = protocols
+                # Add bonus for each new protocol
+                for proto in protocols:
+                    if proto not in self.protocols_seen:
+                        logging.info(f"New protocol interaction: {proto}! Adding exploration bonus.")
+                        self.protocols_seen.add(proto)
+                        final_reward += 1.0
+                    else:
+                        logging.info(f"Already interacted with {proto}. No bonus.")
         
         return final_reward, info
 

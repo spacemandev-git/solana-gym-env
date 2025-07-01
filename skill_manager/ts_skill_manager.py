@@ -13,7 +13,7 @@ class TypeScriptSkillManager:
         self._load_existing_skills()
 
     def _load_existing_skills(self):
-        for filename in os.listdir(self.skills_dir):
+        for filename in sorted(os.listdir(self.skills_dir)):
             if filename.endswith(".ts"):
                 skill_id = self.next_skill_id
                 self.skills[skill_id] = os.path.join(self.skills_dir, filename)

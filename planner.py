@@ -38,8 +38,10 @@ Your goal is to write a TypeScript module that exports a new "skill" for the age
 The module must contain a single asynchronous function `executeSkill(env: any)`.
 This function takes the low-level Solana environment `env` as input.
 
-The function must return a Promise that resolves to an object with a `reason` property: `{{ reason: string; }}`.
-- `reason`: A short string explaining the outcome (e.g., "success", "insufficient_funds").
+The function must return a Promise that resolves to a tuple: `[number, string, string | null]`.
+- First element: A number indicating the reward (e.g., 1.0 for success, 0.0 for failure).
+- Second element: A short string explaining the outcome (e.g., "success", "insufficient_funds").
+- Third element: A JSON string of the transaction receipt, or null if no transaction was made.
 
 **Environment Observation:**
 ```json
@@ -107,9 +109,10 @@ The code should be self-contained and ready to be executed.
     def _get_dummy_skill(self) -> str:
         """Returns a hardcoded dummy skill for testing without an LLM."""
         return """
-export async function executeSkill(env: any): Promise<{ reason: string; }> {
+export async function executeSkill(env: any): Promise<[number, string, string | null]> {
     // This is a dummy skill that simulates a simple transfer.
-    return { reason: "simulated_success" };
+    const txReceipt = env.simulateTransaction(true, "11111111111111111111111111111111");
+    return [1.0, "simulated_success", txReceipt];
 }
 """
 
