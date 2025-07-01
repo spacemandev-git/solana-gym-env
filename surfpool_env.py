@@ -1,9 +1,11 @@
 import gymnasium as gym
 import numpy as np
 import subprocess
-import time
 import asyncio
+import logging
+import json
 from typing import Optional, Callable, Set
+from clean_logging import setup_clean_logging
 
 from gymnasium import spaces
 from solana.rpc.api import Client as RpcClient
@@ -15,7 +17,8 @@ from solders.message import MessageV0
 from solders.hash import Hash
 from solders.pubkey import Pubkey
 
-# Define constants for the observation and action spaces
+setup_clean_logging()
+
 # TODO: These should be configured based on the specific protocols and tokens
 MAX_TOKENS = 10  # Maximum number of different tokens in the wallet
 NUM_PROTOCOLS = 20 # Number of known protocols the agent can interact with
@@ -60,47 +63,59 @@ class SurfpoolEnv(gym.Env):
         # This action space is a placeholder. The Voyager layer will use its own.
         self.action_space = spaces.Discrete(1)
         self.last_observation = None
+        self.last_tx_receipt = None
 
 
     def _start_test_validator(self):
-        print("Starting Solana test validator via surfpool...")
+        logging.info("Starting Solana test validator via surfpool...")
         try:
-            command = [
-                'surfpool', 'start', '-u', self.rpc_url
-            ]
+            command = ['surfpool', 'start', '-u', self.rpc_url]
+            # Redirect stdout and stderr to DEVNULL to prevent ResourceWarning
             self.test_validator_process = subprocess.Popen(
                 command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
-            print("Surfpool process started.")
+            logging.info("Surfpool process started.")
         except FileNotFoundError:
-            print("Error: 'surfpool' command not found. Please ensure it's installed and in your PATH.")
+            logging.error("Error: 'surfpool' command not found. Please ensure it's installed and in your PATH.")
             self.test_validator_process = None
         except Exception as e:
-            print(f"Error starting test validator: {e}")
+            logging.error(f"Error starting test validator: {e}", exc_info=True)
             self.test_validator_process = None
 
     async def _wait_for_validator(self):
         """Polls the RPC endpoint until it's responsive."""
-        print("Waiting for validator to start...")
+        logging.info("Waiting for validator to start...")
         for i in range(60):  # 60 seconds timeout
             try:
-                # Check for block 0 as a health check
                 await self.client.get_block(0)
-                print("Validator is healthy.")
+                logging.info("Validator is healthy.")
                 return
             except Exception:
                 await asyncio.sleep(1)
         raise RuntimeError("Validator did not start in time.")
 
     def _stop_test_validator(self):
-        if self.test_validator_process and isinstance(self.test_validator_process, subprocess.Popen):
-            print("Stopping Solana test validator...")
-            self.test_validator_process.terminate()
-            self.test_validator_process.wait()
+        if self.test_validator_process and self.test_validator_process.poll() is None:
+            logging.info("Stopping Solana test validator...")
+            try:
+                self.test_validator_process.terminate()
+                try:
+                    # Reduce timeout for faster test runs
+                    self.test_validator_process.wait(timeout=2)
+                    logging.info("Validator process terminated gracefully.")
+                except subprocess.TimeoutExpired:
+                    logging.warning("Validator process did not terminate in time, killing it.")
+                    self.test_validator_process.kill()
+                    self.test_validator_process.wait()
+                    logging.info("Validator process killed.")
+            except Exception as e:
+                logging.error(f"An error occurred while stopping the validator: {e}", exc_info=True)
+                if self.test_validator_process.poll() is None:
+                    self.test_validator_process.kill()
+                    self.test_validator_process.wait()
             self.test_validator_process = None
-            print("Solana test validator stopped.")
 
     async def _get_observation(self, last_tx_result=None):
         # In a real implementation, you would fetch this data from the chain
@@ -126,14 +141,16 @@ class SurfpoolEnv(gym.Env):
             # TODO: Get other token balances
 
         except Exception as e:
-            print(f"Error getting observation: {e}")
+            logging.error(f"Error getting observation: {e}", exc_info=True)
 
         if last_tx_result:
-            if last_tx_result["meta"]["err"] is None:
+            # The receipt is a JSON string, so we need to parse it
+            receipt_dict = json.loads(last_tx_result)
+            if receipt_dict.get("meta", {}).get("err") is None:
                 obs["last_tx_success"] = 1
             else:
                 obs["last_tx_success"] = 0
-                obs["last_tx_error"] = str(last_tx_result["meta"]["err"])
+                obs["last_tx_error"] = str(receipt_dict.get("meta", {}).get("err"))
 
         self.last_observation = obs
         return obs
@@ -152,70 +169,73 @@ class SurfpoolEnv(gym.Env):
         
         # Fund the agent
         try:
-            print(f"Airdropping SOL to {self.agent_keypair.pubkey()}...")
+            logging.info(f"Airdropping SOL to {self.agent_keypair.pubkey()}...")
             airdrop_sig = await self.client.request_airdrop(self.agent_keypair.pubkey(), 2 * 10**9) # 2 SOL
             await self.client.confirm_transaction(airdrop_sig.value, "confirmed", 30.0)
-            print("Airdrop successful.")
+            logging.info("Airdrop successful.")
         except Exception as e:
-            print(f"Airdrop failed: {e}")
-            # If airdrop fails, we can't continue the episode.
-            # Consider a more robust retry mechanism.
-            return None, {"error": "Airdrop failed"}
+            logging.error(f"Airdrop failed: {e}", exc_info=True)
+            return None, {"error": f"Airdrop failed: {e}"}
 
+        self.last_tx_receipt = None
         observation = await self._get_observation()
         info = {} # No extra info on reset
         return observation, info
 
-    async def step(self, tx: VersionedTransaction, signers: list[Keypair]):
+    async def step(self, tx: VersionedTransaction):
         """
-        Executes a pre-built transaction on the Solana network.
+        Executes a pre-signed transaction on the Solana network.
         This is the core function of the low-level environment.
+        The transaction must be signed before being passed to this method.
         """
+        self.last_tx_receipt = None
         try:
-            sig = await self.client.send_transaction(tx, *signers)
+            # The modern send_transaction expects a signed transaction
+            sig = await self.client.send_transaction(tx)
+            
+            # The commitment level for confirmation should be high enough
+            await self.client.confirm_transaction(sig.value, "confirmed", 30.0)
+            
+            # Fetch the confirmed transaction
             result = await self.client.get_transaction(sig.value, commitment="confirmed")
             
             if not result or not result.value:
-                 raise Exception("Transaction result not found")
+                 raise Exception(f"Transaction result not found for signature {sig.value}")
 
-            # The result from get_transaction is a dict, not an object with attributes
-            tx_receipt = {
-                "meta": result.value.transaction.meta.to_json(),
-                "transaction": result.value.transaction.transaction.to_json(),
-            }
-            
+            tx_receipt = result.value.transaction.to_json()
+            self.last_tx_receipt = tx_receipt
+
         except Exception as e:
-            print(f"Error sending transaction: {e}")
-            # Return a dummy error structure if the transaction fails to execute
+            logging.error(f"Error sending transaction: {e}", exc_info=True)
             obs = await self._get_observation()
-            return obs, None, True, {"error": str(e)} # Terminate on RPC error
+            # Pass the error in the info dict
+            return obs, None, True, {"error": str(e)}
 
+        self.last_tx_receipt = tx_receipt
         obs = await self._get_observation(last_tx_result=tx_receipt)
         
-        # The low-level env doesn't compute rewards, it just returns the outcome.
-        # The Voyager layer will be responsible for reward calculation.
-        # We return the raw transaction receipt for the high-level env to process.
         return obs, tx_receipt, False, {}
 
     def render(self, mode="human"):
-        print("Rendering not implemented for this environment.")
+        logging.info("Rendering not implemented for this environment.")
         pass
 
-    def close(self):
+    async def close(self):
         self._stop_test_validator()
-        asyncio.run(self.client.close())
-        print("SurfpoolEnv closed.")
+        if self.client:
+            await self.client.close()
+        logging.info("SurfpoolEnv closed.")
 
 if __name__ == '__main__':
-    # Example of how to use the low-level environment directly
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    
     async def main():
         env = SurfpoolEnv()
         obs, info = await env.reset()
-        print("Environment reset.")
-        print("Initial Observation:", obs)
+        logging.info("Environment reset.")
+        logging.info(f"Initial Observation: {obs}")
 
         if obs is not None:
-            # Create a simple transfer transaction to test the step function
             recipient = Keypair().pubkey()
             instruction = transfer(
                 TransferParams(
@@ -234,14 +254,14 @@ if __name__ == '__main__':
             )
             tx = VersionedTransaction(message, [env.agent_keypair])
 
-            print("\nExecuting a test transaction...")
-            obs, receipt, terminated, info = await env.step(tx, [env.agent_keypair])
+            logging.info("\nExecuting a test transaction...")
+            obs, receipt, terminated, info = await env.step(tx)
             
-            print("\n--- Step Result ---")
-            print("Observation:", obs)
-            print("Transaction Receipt:", receipt)
-            print("Terminated:", terminated)
-            print("Info:", info)
+            logging.info("\n--- Step Result ---")
+            logging.info(f"Observation: {obs}")
+            logging.info(f"Transaction Receipt: {receipt}")
+            logging.info(f"Terminated: {terminated}")
+            logging.info(f"Info: {info}")
 
         await env.close()
 

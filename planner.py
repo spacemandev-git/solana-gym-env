@@ -1,33 +1,118 @@
+import os
+import logging
+from openai import OpenAI
 from skill_library import SkillManager
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+
+# It's good practice to use environment variables for API keys
+# Ensure you have OPENAI_API_KEY set in your environment
+# client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+client = None # Disabled for now
 
 class LLMPlanner:
     """
-    A placeholder for a large language model (LLM) planner.
-    In a real implementation, this class would interface with an LLM
-    (e.g., GPT-4, a local model) to generate Python code for new skills
-    based on the current environment observation and existing skills.
+    This class interfaces with a large language model (LLM) to generate
+    Python code for new skills based on the current environment observation,
+    existing skills, and a high-level objective.
     """
-    def __init__(self, skill_manager: SkillManager):
+    def __init__(self, skill_manager: SkillManager, model: str = "gpt-4-1106-preview"):
         self.skill_manager = skill_manager
+        self.model = model
 
-    def propose(self, observation: Dict[str, Any]) -> str:
-        """
-        Proposes a new skill based on the current observation.
+    def _generate_prompt(
+        self,
+        observation: Dict[str, Any],
+        objective: str,
+        error: Optional[str] = None
+    ) -> str:
+        """Constructs the prompt for the LLM."""
         
-        For now, this returns a hardcoded dummy skill. A real implementation
-        would involve crafting a prompt for the LLM.
-        """
-        print("LLMPlanner: Proposing a new skill (using a dummy skill for now).")
+        existing_skills = "\n".join(
+            f"- {name}: {doc}" for name, doc in self.skill_manager.get_skill_docs().items()
+        )
         
-        # TODO: Implement actual LLM prompting logic here.
-        # The prompt would include:
-        # - The current observation (wallet balances, block height, etc.)
-        # - The list of existing skills (to avoid duplicates and build on them)
-        # - A high-level goal (e.g., "Interact with a new protocol")
+        prompt = f"""
+You are an expert Solana developer and an AI agent inside a reinforcement learning environment.
+Your goal is to write a Python script that defines a new "skill" for the agent to perform.
 
-        dummy_skill_code = """
+The script must contain a single asynchronous function `execute_skill(env: SurfpoolEnv)`.
+This function takes the low-level Solana environment `env` as input, which provides:
+- `env.client`: An `AsyncClient` for interacting with the Solana RPC.
+- `env.agent_keypair`: The `Keypair` for the agent, which you must use to sign transactions.
+
+The function must return a tuple `(reward: float, reason: str)`.
+- `reward`: A float indicating the outcome (e.g., 1.0 for success, 0.0 for failure).
+- `reason`: A short string explaining the outcome (e.g., "success", "insufficient_funds").
+
+**Environment Observation:**
+```json
+{observation}
+```
+
+**High-Level Objective:**
+{objective}
+
+**Existing Skills:**
+{existing_skills if existing_skills else "No skills yet."}
+"""
+        if error:
+            prompt += f"""
+**Previous Attempt Failed:**
+The last generated skill failed with the following error. Please analyze the error and write a corrected version of the skill.
+```
+{error}
+```
+"""
+        prompt += """
+**Your Task:**
+Write the complete Python code for the `execute_skill` function.
+Do not include any other code or explanations outside of the Python code block.
+The code should be self-contained and ready to be executed.
+Make sure to handle all necessary imports within the skill code.
+"""
+        return prompt
+
+    def propose(
+        self,
+        observation: Dict[str, Any],
+        objective: str = "Interact with a new protocol or perform a useful action.",
+        error: Optional[str] = None
+    ) -> str:
+        """
+        Proposes a new skill by querying the LLM.
+        """
+        if not client:
+            logging.warning("LLMPlanner: OpenAI client not configured. Returning a dummy skill.")
+            return self._get_dummy_skill()
+
+        prompt = self._generate_prompt(observation, objective, error)
+        
+        try:
+            logging.info("LLMPlanner: Querying LLM for a new skill...")
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+            )
+            
+            skill_code = response.choices[0].message.content
+            if skill_code.startswith("```python"):
+                skill_code = skill_code[len("```python"):].strip()
+            if skill_code.endswith("```"):
+                skill_code = skill_code[:-len("```")].strip()
+                
+            logging.info("LLMPlanner: Received skill proposal from LLM.")
+            return skill_code
+            
+        except Exception as e:
+            logging.error(f"LLMPlanner: Error querying LLM: {e}", exc_info=True)
+            return self._get_dummy_skill()
+
+    def _get_dummy_skill(self) -> str:
+        """Returns a hardcoded dummy skill for testing without an LLM."""
+        return """
 import asyncio
+import logging
 from surfpool_env import SurfpoolEnv
 from solders.keypair import Keypair
 from solders.system_program import transfer, TransferParams
@@ -36,61 +121,33 @@ from solders.transaction import VersionedTransaction
 
 async def execute_skill(env: SurfpoolEnv):
     '''
-    This skill executes a simple transfer of 1000 lamports to a new random account.
+    This is a dummy skill that simulates a simple transfer.
     '''
-    print("Executing dummy skill: sending a simple transfer.")
-    
+    logging.info("Executing dummy skill: sending a simple transfer.")
     try:
-        recipient = Keypair().pubkey()
-        instruction = transfer(
-            TransferParams(
-                from_pubkey=env.agent_keypair.pubkey(),
-                to_pubkey=recipient,
-                lamports=1000
-            )
-        )
-        
-        latest_blockhash = await env.client.get_latest_blockhash()
-        message = MessageV0.try_compile(
-            payer=env.agent_keypair.pubkey(),
-            instructions=[instruction],
-            address_lookup_table_accounts=[],
-            recent_blockhash=latest_blockhash.value.blockhash
-        )
-        # tx = VersionedTransaction(message, [env.agent_keypair])
-        # obs, receipt, terminated, info = await env.step(tx, [env.agent_keypair])
-        
-        # For this final test, we will simulate a successful transaction
-        print("Simulating a successful transaction in dummy skill.")
-        return 1, "success"
-            
+        logging.info("Simulating a successful transaction in dummy skill.")
+        return 1.0, "simulated_success"
     except Exception as e:
-        print(f"An exception occurred during skill execution: {e}")
-        return 0, "exception"
+        logging.error(f"An exception occurred during dummy skill execution: {e}", exc_info=True)
+        return 0.0, f"exception: {e}"
 """
-        return dummy_skill_code
 
 if __name__ == '__main__':
-    # Example Usage
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
     skill_manager = SkillManager(skill_root="./temp_skills_planner")
     planner = LLMPlanner(skill_manager)
     
-    # Mock an observation
     mock_observation = {"wallet_balances": [1.0], "block_height": [100]}
     
-    # Propose a new skill
     new_skill_code = planner.propose(mock_observation)
-    print("\n--- Proposed Skill Code ---")
-    print(new_skill_code)
+    logging.info("\n--- Proposed Skill Code ---")
+    logging.info(new_skill_code)
     
-    # Register the new skill
     skill_id = skill_manager.register(new_skill_code)
-    print(f"\nRegistered proposed skill with ID: {skill_id}")
+    logging.info(f"\nRegistered proposed skill with ID: {skill_id}")
     
-    # Verify it's in the manager
     assert skill_id in skill_manager.skills
-    print("Skill successfully registered in SkillManager.")
+    logging.info("Skill successfully registered in SkillManager.")
     
-    # Clean up
     import shutil
     shutil.rmtree("./temp_skills_planner")
