@@ -1,7 +1,7 @@
 import os
 import logging
 from openai import OpenAI
-from skill_library import SkillManager
+from skill_manager.ts_skill_manager import TypeScriptSkillManager
 from typing import Dict, Any, Optional
 
 # It's good practice to use environment variables for API keys
@@ -12,10 +12,10 @@ client = None # Disabled for now
 class LLMPlanner:
     """
     This class interfaces with a large language model (LLM) to generate
-    Python code for new skills based on the current environment observation,
+    TypeScript code for new skills based on the current environment observation,
     existing skills, and a high-level objective.
     """
-    def __init__(self, skill_manager: SkillManager, model: str = "gpt-4-1106-preview"):
+    def __init__(self, skill_manager: TypeScriptSkillManager, model: str = "gpt-4-1106-preview"):
         self.skill_manager = skill_manager
         self.model = model
 
@@ -28,20 +28,17 @@ class LLMPlanner:
         """Constructs the prompt for the LLM."""
         
         existing_skills = "\n".join(
-            f"- {name}: {doc}" for name, doc in self.skill_manager.get_skill_docs().items()
+            [f"- {self.skill_manager.skills[k]}" for k in self.skill_manager.skills.keys()]
         )
         
         prompt = f"""
 You are an expert Solana developer and an AI agent inside a reinforcement learning environment.
-Your goal is to write a Python script that defines a new "skill" for the agent to perform.
+Your goal is to write a TypeScript module that exports a new "skill" for the agent to perform.
 
-The script must contain a single asynchronous function `execute_skill(env: SurfpoolEnv)`.
-This function takes the low-level Solana environment `env` as input, which provides:
-- `env.client`: An `AsyncClient` for interacting with the Solana RPC.
-- `env.agent_keypair`: The `Keypair` for the agent, which you must use to sign transactions.
+The module must contain a single asynchronous function `executeSkill(env: any)`.
+This function takes the low-level Solana environment `env` as input.
 
-The function must return a tuple `(reward: float, reason: str)`.
-- `reward`: A float indicating the outcome (e.g., 1.0 for success, 0.0 for failure).
+The function must return a Promise that resolves to an object with a `reason` property: `{{ reason: string; }}`.
 - `reason`: A short string explaining the outcome (e.g., "success", "insufficient_funds").
 
 **Environment Observation:**
@@ -65,10 +62,9 @@ The last generated skill failed with the following error. Please analyze the err
 """
         prompt += """
 **Your Task:**
-Write the complete Python code for the `execute_skill` function.
-Do not include any other code or explanations outside of the Python code block.
+Write the complete TypeScript code for the `executeSkill` function.
+Do not include any other code or explanations outside of the TypeScript code block.
 The code should be self-contained and ready to be executed.
-Make sure to handle all necessary imports within the skill code.
 """
         return prompt
 
@@ -96,8 +92,8 @@ Make sure to handle all necessary imports within the skill code.
             )
             
             skill_code = response.choices[0].message.content
-            if skill_code.startswith("```python"):
-                skill_code = skill_code[len("```python"):].strip()
+            if skill_code.startswith("```typescript"):
+                skill_code = skill_code[len("```typescript"):].strip()
             if skill_code.endswith("```"):
                 skill_code = skill_code[:-len("```")].strip()
                 
@@ -111,30 +107,15 @@ Make sure to handle all necessary imports within the skill code.
     def _get_dummy_skill(self) -> str:
         """Returns a hardcoded dummy skill for testing without an LLM."""
         return """
-import asyncio
-import logging
-from surfpool_env import SurfpoolEnv
-from solders.keypair import Keypair
-from solders.system_program import transfer, TransferParams
-from solders.message import MessageV0
-from solders.transaction import VersionedTransaction
-
-async def execute_skill(env: SurfpoolEnv):
-    '''
-    This is a dummy skill that simulates a simple transfer.
-    '''
-    logging.info("Executing dummy skill: sending a simple transfer.")
-    try:
-        logging.info("Simulating a successful transaction in dummy skill.")
-        return 1.0, "simulated_success"
-    except Exception as e:
-        logging.error(f"An exception occurred during dummy skill execution: {e}", exc_info=True)
-        return 0.0, f"exception: {e}"
+export async function executeSkill(env: any): Promise<{ reason: string; }> {
+    // This is a dummy skill that simulates a simple transfer.
+    return { reason: "simulated_success" };
+}
 """
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(message)s')
-    skill_manager = SkillManager(skill_root="./temp_skills_planner")
+    skill_manager = TypeScriptSkillManager(skills_dir="./temp_skills_planner")
     planner = LLMPlanner(skill_manager)
     
     mock_observation = {"wallet_balances": [1.0], "block_height": [100]}

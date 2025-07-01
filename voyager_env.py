@@ -7,19 +7,36 @@ import json
 from typing import Set, Dict, Any
 
 from surfpool_env import SurfpoolEnv
-from skill_library import SkillManager
+from skill_manager.ts_skill_manager import TypeScriptSkillManager
 from planner import LLMPlanner
 
 # --- Constants ---
 CONFIG_MAX_LLM_SKILL_TRIES = 3
 
-# Mapping of known program IDs to protocol names
-# (This would be expanded in a real scenario)
-KNOWN_PROGRAM_IDS: Dict[str, str] = {
-    "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4": "Jupiter",
-    "MeteoRb91wabcB2m8T8T16cfj2hD6yB2a2d7s65": "Meteora",
-    # Add more program IDs here
-}
+import csv
+
+KNOWN_PROGRAM_IDS: Dict[str, str] = {}
+
+def load_program_ids_from_csv(file_path: str):
+    global KNOWN_PROGRAM_IDS
+    KNOWN_PROGRAM_IDS = {}
+    if not os.path.exists(file_path) or os.stat(file_path).st_size == 0:
+        raise FileNotFoundError(f"Program IDs CSV file not found or is empty: {file_path}")
+    with open(file_path, mode='r', newline='') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            if 'program_address' in row and 'project_name' in row:
+                KNOWN_PROGRAM_IDS[row['program_address']] = row['project_name']
+
+# Load program IDs at startup
+try:
+    load_program_ids_from_csv('data/program_ids.csv')
+except FileNotFoundError as e:
+    logging.error(f"Failed to load program IDs: {e}")
+    # Depending on criticality, you might want to exit or use a fallback
+    # For now, we'll let it proceed with an empty dict if the file is missing/empty
+except Exception as e:
+    logging.error(f"An unexpected error occurred while loading program IDs: {e}")
 
 
 class SolanaVoyagerEnv(gym.Env):
@@ -38,7 +55,7 @@ class SolanaVoyagerEnv(gym.Env):
         self.observation_space = self.solana_env.observation_space
 
         # Layer 1: Voyager components
-        self.skills = SkillManager(skill_root=skill_root)
+        self.skills = TypeScriptSkillManager(skill_root=skill_root)
         self.planner = LLMPlanner(self.skills)
 
         # RL view of the world
@@ -104,24 +121,18 @@ class SolanaVoyagerEnv(gym.Env):
             )
             
             try:
-                skill_func = self.skills.load_skill_from_code(skill_code)
-            except Exception as e:
-                logging.error(f"Syntax error in generated skill: {e}")
-                last_error = f"Syntax error: {e}"
-                continue
-
-            try:
+                file_path = self.skills.save_skill("new_skill", skill_code)
                 logging.info("Testing the newly generated skill...")
-                reward, reason = await skill_func(self.solana_env)
-                logging.info(f"Skill test result: reward={reward}, reason='{reason}'")
+                result = self.skills.execute_skill(file_path)
+                logging.info(f"Skill test result: {result}")
 
-                if reward > 0:
+                if result.get("success"):
                     skill_id = self.skills.register(skill_code)
                     self._update_action_space()
                     info = {"new_skill_id": skill_id, "status": "success"}
-                    return 1.0, info
+                    return 1.0, info # Reward for successfully growing a skill
                 else:
-                    last_error = f"Skill executed but failed. Reason: {reason}"
+                    last_error = f"Skill executed but failed. Reason: {result.get('reason')}"
 
             except Exception as e:
                 logging.error(f"Runtime error in generated skill: {e}")
@@ -144,16 +155,20 @@ class SolanaVoyagerEnv(gym.Env):
         Executes a skill, computes the reward, and handles exceptions.
         The protocol labeling happens regardless of skill success or failure.
         """
-        if skill_id not in self.skills:
+        if skill_id not in self.skills.skills:
             return 0.0, {"error": f"Skill {skill_id} not found."}
 
-        skill_func = self.skills[skill_id]
+        file_path = self.skills.skills[skill_id]
         base_reward = 0.0
         info = {}
 
         try:
-            base_reward, done_reason = await skill_func(self.solana_env)
-            info["done_reason"] = done_reason
+            result = self.skills.execute_skill(file_path)
+            info["done_reason"] = result.get("reason")
+            if result.get("success"):
+                base_reward = 1.0 # Base reward for successful skill execution
+            else:
+                base_reward = 0.0 # No base reward for failed skill execution
         except Exception as e:
             logging.error(f"Error running skill {skill_id}: {e}")
             info["error"] = f"Exception in skill {skill_id}: {e}"
