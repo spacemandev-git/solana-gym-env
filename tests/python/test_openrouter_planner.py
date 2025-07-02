@@ -34,7 +34,7 @@ class TestOpenRouterPlanner(unittest.TestCase):
             
             self.assertIn("export async function executeSkill", skill_code)
             self.assertIn("Promise<[number, string, string | null]>", skill_code)
-            self.assertIn("simulated_success", skill_code)
+            self.assertIn("created_transfer_tx", skill_code)
     
     @patch('requests.post')
     def test_openrouter_api_call_success(self, mock_post):
