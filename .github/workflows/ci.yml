@@ -81,7 +81,6 @@ jobs:
       run: |
         uv venv
         uv pip install -r requirements.txt
-        uv pip install -e .
         cd skill_runner && bun install
         
     - name: Run dummy episode test
