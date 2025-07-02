@@ -27,9 +27,9 @@ jobs:
         
     - name: Run Python tests
       run: |
-        # Run all tests except known slow ones
-        # NOTE: Excluding test_e2e_jupiter_swap_simple.py as it may take >2m
-        PYTHONPATH=. uv run python -m unittest discover tests/python -v -k "not test_e2e"
+        # Run all tests except the e2e tests which can take >2m
+        # Run specific test modules to avoid the slow e2e test
+        PYTHONPATH=. uv run python -m unittest tests.python.test_base64_blockhash_issue tests.python.test_base64_transactions tests.python.test_openrouter_planner tests.python.test_ts_skill_manager tests.python.test_voyager_env -v
       timeout-minutes: 5
 
   test-typescript:
