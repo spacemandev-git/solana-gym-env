@@ -20,12 +20,19 @@ jobs:
     - name: Set up Python
       run: uv python install 3.12
       
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@v1
+      with:
+        bun-version: latest
+        
     - name: Install dependencies
       run: |
         uv venv
         uv pip install -r requirements.txt
+        cd skill_runner && bun install && cd ..
         
     - name: Run Python tests
+      working-directory: ${{ github.workspace }}
       run: |
         # Run all tests except the e2e tests which can take >2m
         # Run specific test modules to avoid the slow e2e test

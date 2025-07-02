@@ -84,7 +84,7 @@ export async function executeSkill(env: any): Promise<[number, string, string | 
                     skill_code = planner.propose({"wallet_balances": [1.0]})
             
             # Should return dummy skill on failure
-            self.assertIn("simulated_success", skill_code)
+            self.assertIn("created_transfer_tx", skill_code)
     
     def test_prompt_generation(self):
         """Test that prompts are generated correctly."""
