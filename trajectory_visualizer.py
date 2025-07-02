@@ -12,7 +12,8 @@ from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Any, Optional
-from trajectory_tracker import TrajectoryTracker, Episode
+from trajectory_tracker import TrajectoryTracker, Episode, TransactionDetails
+from transaction_parser import format_transaction_summary, get_transaction_complexity_score
 import json
 
 
@@ -592,3 +593,426 @@ class TrajectoryVisualizer:
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.show()
+    
+    def plot_transaction_complexity(self, save_path: Optional[str] = None) -> None:
+        """Create visualization of transaction complexity across episodes."""
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=(
+                "Transaction Complexity Over Time",
+                "Compute Units Distribution", 
+                "Fee Analysis",
+                "Instruction Count Distribution"
+            ),
+            vertical_spacing=0.15,
+            horizontal_spacing=0.12
+        )
+        
+        # Collect transaction data
+        complexities = []
+        compute_units = []
+        fees = []
+        instruction_counts = []
+        timestamps = []
+        episode_ids = []
+        
+        for ep in self.tracker.episodes:
+            for attempt in ep.skill_attempts:
+                if attempt.transaction_details:
+                    tx = attempt.transaction_details
+                    complexities.append(get_transaction_complexity_score(tx))
+                    compute_units.append(tx.compute_units_consumed)
+                    fees.append(tx.fee / 1e9)  # Convert to SOL
+                    instruction_counts.append(tx.num_instructions)
+                    timestamps.append(attempt.timestamp - self.tracker.episodes[0].start_time)
+                    episode_ids.append(ep.episode_id)
+        
+        if not complexities:
+            print("No transaction data found.")
+            return
+        
+        # 1. Complexity over time
+        fig.add_trace(
+            go.Scatter(
+                x=timestamps,
+                y=complexities,
+                mode='markers+lines',
+                marker=dict(
+                    size=8,
+                    color=episode_ids,
+                    colorscale='Viridis',
+                    showscale=True,
+                    colorbar=dict(title="Episode")
+                ),
+                line=dict(width=1, color='gray', dash='dot'),
+                name='Complexity'
+            ),
+            row=1, col=1
+        )
+        
+        # 2. Compute Units Distribution
+        fig.add_trace(
+            go.Histogram(
+                x=compute_units,
+                nbinsx=20,
+                marker_color='lightblue',
+                name='CU Distribution'
+            ),
+            row=1, col=2
+        )
+        
+        # 3. Fee Analysis
+        fig.add_trace(
+            go.Box(
+                y=fees,
+                name='Transaction Fees',
+                marker_color='green',
+                boxpoints='all',
+                jitter=0.3,
+                pointpos=-1.8
+            ),
+            row=2, col=1
+        )
+        
+        # 4. Instruction Count Distribution
+        fig.add_trace(
+            go.Histogram(
+                x=instruction_counts,
+                nbinsx=max(instruction_counts) if instruction_counts else 10,
+                marker_color='orange',
+                name='Instruction Count'
+            ),
+            row=2, col=2
+        )
+        
+        # Update axes
+        fig.update_xaxes(title_text="Time (seconds)", row=1, col=1)
+        fig.update_yaxes(title_text="Complexity Score", row=1, col=1)
+        
+        fig.update_xaxes(title_text="Compute Units", row=1, col=2)
+        fig.update_yaxes(title_text="Count", row=1, col=2)
+        
+        fig.update_yaxes(title_text="Fee (SOL)", row=2, col=1)
+        
+        fig.update_xaxes(title_text="Number of Instructions", row=2, col=2)
+        fig.update_yaxes(title_text="Count", row=2, col=2)
+        
+        fig.update_layout(
+            title="Transaction Complexity Analysis",
+            height=800,
+            showlegend=False
+        )
+        
+        if save_path:
+            fig.write_html(save_path)
+        fig.show()
+    
+    def create_transaction_browser(self, save_path: Optional[str] = None) -> None:
+        """Create an interactive transaction browser."""
+        # Collect all transactions
+        transactions = []
+        
+        for ep in self.tracker.episodes:
+            for attempt in ep.skill_attempts:
+                if attempt.transaction_details:
+                    tx = attempt.transaction_details
+                    transactions.append({
+                        'episode': ep.episode_id,
+                        'skill': attempt.skill_name,
+                        'timestamp': attempt.timestamp,
+                        'signature': f"{tx.signature[:8]}...{tx.signature[-8:]}",
+                        'success': '✓' if tx.success else '✗',
+                        'fee_sol': f"{tx.fee / 1e9:.6f}",
+                        'compute_units': f"{tx.compute_units_consumed:,}",
+                        'accounts': tx.num_accounts,
+                        'instructions': tx.num_instructions,
+                        'complexity': get_transaction_complexity_score(tx),
+                        'protocols': ', '.join(attempt.protocols_discovered) or 'None',
+                        'full_details': tx
+                    })
+        
+        if not transactions:
+            print("No transactions found.")
+            return
+        
+        # Create DataFrame for easier manipulation
+        df = pd.DataFrame(transactions)
+        
+        # Create the interactive figure
+        fig = go.Figure()
+        
+        # Add main scatter plot
+        fig.add_trace(go.Scatter(
+            x=df['timestamp'],
+            y=df['complexity'],
+            mode='markers',
+            marker=dict(
+                size=df['instructions'] * 3,
+                color=df['episode'],
+                colorscale='Viridis',
+                showscale=True,
+                colorbar=dict(title="Episode"),
+                line=dict(width=1, color='black')
+            ),
+            text=df.apply(lambda row: f"""
+Skill: {row['skill']}
+Signature: {row['signature']}
+Success: {row['success']}
+Fee: {row['fee_sol']} SOL
+Compute Units: {row['compute_units']}
+Accounts: {row['accounts']}
+Instructions: {row['instructions']}
+Protocols: {row['protocols']}
+            """.strip(), axis=1),
+            hovertemplate='%{text}<extra></extra>',
+            name='Transactions'
+        ))
+        
+        # Add success/failure indicators
+        success_df = df[df['success'] == '✓']
+        fail_df = df[df['success'] == '✗']
+        
+        if not fail_df.empty:
+            fig.add_trace(go.Scatter(
+                x=fail_df['timestamp'],
+                y=fail_df['complexity'],
+                mode='markers',
+                marker=dict(
+                    size=20,
+                    color='red',
+                    symbol='x',
+                    line=dict(width=2, color='darkred')
+                ),
+                name='Failed Transactions',
+                showlegend=True
+            ))
+        
+        fig.update_layout(
+            title="Interactive Transaction Browser",
+            xaxis_title="Timestamp",
+            yaxis_title="Transaction Complexity Score",
+            height=600,
+            hovermode='closest',
+            template='plotly_white'
+        )
+        
+        # Add range slider
+        fig.update_xaxes(rangeslider_visible=True)
+        
+        if save_path:
+            # Also save detailed transaction data
+            html_content = self._create_transaction_browser_html(transactions)
+            with open(save_path, 'w') as f:
+                f.write(html_content)
+        fig.show()
+    
+    def _create_transaction_browser_html(self, transactions: List[Dict]) -> str:
+        """Create a detailed HTML transaction browser."""
+        html = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Solana Voyager Transaction Browser</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
+        .header { text-align: center; margin-bottom: 30px; }
+        .transaction-card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            transition: all 0.3s ease;
+        }
+        .transaction-card:hover { box-shadow: 0 4px 8px rgba(0,0,0,0.2); }
+        .tx-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .tx-title { font-size: 18px; font-weight: bold; }
+        .success { color: #4CAF50; }
+        .failed { color: #f44336; }
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+        .metric {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .metric-label { font-size: 12px; color: #666; }
+        .metric-value { font-size: 20px; font-weight: bold; margin-top: 5px; }
+        .instructions {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            margin-top: 15px;
+        }
+        .instruction {
+            margin-bottom: 10px;
+            padding: 8px;
+            background: white;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .logs {
+            margin-top: 15px;
+            max-height: 200px;
+            overflow-y: auto;
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 11px;
+            line-height: 1.4;
+        }
+        .filter-controls {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+        select, input { padding: 8px; border-radius: 4px; border: 1px solid #ddd; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Solana Voyager Transaction Browser</h1>
+        <p>Detailed view of all transactions executed by the agent</p>
+    </div>
+    
+    <div class="filter-controls">
+        <label>Filter by Episode: 
+            <select id="episodeFilter" onchange="filterTransactions()">
+                <option value="">All Episodes</option>
+"""
+        
+        # Add episode options
+        episodes = sorted(set(tx['episode'] for tx in transactions))
+        for ep in episodes:
+            html += f'                <option value="{ep}">Episode {ep}</option>\n'
+        
+        html += """
+            </select>
+        </label>
+        <label>Filter by Success: 
+            <select id="successFilter" onchange="filterTransactions()">
+                <option value="">All</option>
+                <option value="✓">Success Only</option>
+                <option value="✗">Failed Only</option>
+            </select>
+        </label>
+        <label>Min Complexity: 
+            <input type="number" id="complexityFilter" value="0" onchange="filterTransactions()">
+        </label>
+    </div>
+    
+    <div id="transactionList">
+"""
+        
+        # Add transaction cards
+        for i, tx in enumerate(transactions):
+            details = tx['full_details']
+            status_class = 'success' if tx['success'] == '✓' else 'failed'
+            
+            html += f"""
+        <div class="transaction-card" data-episode="{tx['episode']}" data-success="{tx['success']}" data-complexity="{tx['complexity']}">
+            <div class="tx-header">
+                <div class="tx-title">Transaction #{i+1} - {tx['skill']}</div>
+                <div class="{status_class}">{tx['success']} Episode {tx['episode']}</div>
+            </div>
+            
+            <div class="metrics">
+                <div class="metric">
+                    <div class="metric-label">Signature</div>
+                    <div class="metric-value">{tx['signature']}</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Fee</div>
+                    <div class="metric-value">{tx['fee_sol']} SOL</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Compute Units</div>
+                    <div class="metric-value">{tx['compute_units']}</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Complexity</div>
+                    <div class="metric-value">{tx['complexity']:.1f}</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Accounts</div>
+                    <div class="metric-value">{tx['accounts']}</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Instructions</div>
+                    <div class="metric-value">{tx['instructions']}</div>
+                </div>
+            </div>
+            
+            <div class="instructions">
+                <strong>Instructions:</strong>
+"""
+            
+            # Add instruction details
+            for j, ix in enumerate(details.instructions):
+                html += f"""                <div class="instruction">{j+1}. {ix.get('type', 'Unknown')} - {len(ix.get('accounts', []))} accounts</div>\n"""
+            
+            html += f"""            </div>
+            
+            <details>
+                <summary style="cursor: pointer; margin-top: 10px;">Show Logs</summary>
+                <div class="logs">
+"""
+            
+            # Add log messages
+            for log in details.log_messages[:20]:  # Limit logs shown
+                html += f"                    {log}<br>\n"
+            
+            if len(details.log_messages) > 20:
+                html += f"                    ... and {len(details.log_messages) - 20} more lines\n"
+            
+            html += """                </div>
+            </details>
+        </div>
+"""
+        
+        html += """
+    </div>
+    
+    <script>
+        function filterTransactions() {
+            const episodeFilter = document.getElementById('episodeFilter').value;
+            const successFilter = document.getElementById('successFilter').value;
+            const complexityFilter = parseFloat(document.getElementById('complexityFilter').value) || 0;
+            
+            const cards = document.querySelectorAll('.transaction-card');
+            cards.forEach(card => {
+                const episode = card.dataset.episode;
+                const success = card.dataset.success;
+                const complexity = parseFloat(card.dataset.complexity);
+                
+                let show = true;
+                if (episodeFilter && episode !== episodeFilter) show = false;
+                if (successFilter && success !== successFilter) show = false;
+                if (complexity < complexityFilter) show = false;
+                
+                card.style.display = show ? 'block' : 'none';
+            });
+        }
+    </script>
+</body>
+</html>
+"""
+        return html

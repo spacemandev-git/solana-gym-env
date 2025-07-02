@@ -18,6 +18,21 @@ import logging
 
 
 @dataclass
+class TransactionDetails:
+    """Detailed information about a transaction."""
+    signature: str
+    slot: int
+    compute_units_consumed: int
+    fee: int  # in lamports
+    num_accounts: int
+    num_instructions: int
+    instructions: List[Dict[str, Any]]  # Simplified instruction info
+    account_keys: List[str]
+    success: bool
+    log_messages: List[str]
+    block_time: Optional[int] = None
+    
+@dataclass
 class SkillAttempt:
     """Record of a single skill execution attempt."""
     timestamp: float
@@ -28,6 +43,7 @@ class SkillAttempt:
     done_reason: str
     protocols_discovered: List[str] = field(default_factory=list)
     error: Optional[str] = None
+    transaction_details: Optional[TransactionDetails] = None
 
 
 @dataclass
@@ -121,7 +137,8 @@ class TrajectoryTracker:
     def record_skill_attempt(self, skill_id: int, skill_name: str,
                            success: bool, reward: float, done_reason: str,
                            protocols_discovered: List[str] = None,
-                           error: Optional[str] = None):
+                           error: Optional[str] = None,
+                           transaction_details: Optional[TransactionDetails] = None):
         """Record a skill execution attempt."""
         if not self.current_episode:
             logging.warning("No active episode to record skill attempt")
@@ -135,7 +152,8 @@ class TrajectoryTracker:
             reward=reward,
             done_reason=done_reason,
             protocols_discovered=protocols_discovered or [],
-            error=error
+            error=error,
+            transaction_details=transaction_details
         )
         self.current_episode.skill_attempts.append(attempt)
         self.current_episode.total_reward += reward
@@ -264,6 +282,10 @@ class TrajectoryTracker:
             
             # Reconstruct skill attempts
             for attempt_data in ep_data["skill_attempts"]:
+                # Handle transaction details if present
+                tx_details = attempt_data.get("transaction_details")
+                if tx_details:
+                    attempt_data["transaction_details"] = TransactionDetails(**tx_details)
                 episode.skill_attempts.append(SkillAttempt(**attempt_data))
             
             self.episodes.append(episode)

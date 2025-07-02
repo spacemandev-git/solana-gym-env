@@ -72,3 +72,22 @@ Thumbs.db
 
 # Project specific
 data/
+
+# Trajectory visualization outputs
+transaction_browser.html
+transaction_complexity_analysis.html
+comprehensive_dashboard.html
+trajectory_dashboard.html
+voyager_with_transactions.png
+voyager_style_demo.png
+*_trajectory_*.html
+*_trajectory_*.png
+
+# Generated trajectory data files
+demo_trajectory_with_transactions.json
+sample_trajectory_data.json
+trajectory_data.json
+*_trajectory_data.json
+
+# Demo output directories
+demo_trajectory_skills/

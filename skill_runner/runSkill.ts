@@ -50,8 +50,10 @@ const surfpoolEnv = {
     // Add getWallet method for compatibility
     getWallet: () => ({
         balances: [2.5, 100.0, 0.0, 0.0, 0.0],
-        publicKey: "mock-wallet-pubkey"
+        publicKey: "11111111111111111111111111111111" // Valid base58 pubkey
     }),
+    // Add getRecentBlockhash for transaction building
+    getRecentBlockhash: () => "11111111111111111111111111111111",
     // Add other methods as needed to mirror SurfpoolEnv
     read: () => "some data",
     write: (data: string) => console.log(`Skill wrote: ${data}`),
