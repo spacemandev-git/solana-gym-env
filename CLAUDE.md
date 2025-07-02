@@ -13,6 +13,7 @@ Solana Gym is a reinforcement learning environment for training agents to intera
 - **Bun v1.x is the only approved runtime**
 - Compilation budget ≤ 5s; execution budget ≤ 10s (enforced by `runSkill.ts`)
 - Python skills are deprecated (keep legacy ones in `skills/legacy_py/` for reference only)
+- Use `uv run` instead of `python ...`
 
 ### Subsystem Responsibilities
 | Component | Must Handle | Must NOT Handle |
@@ -61,7 +62,7 @@ cd skill_runner && bun install
 ### Testing
 ```bash
 # Run all Python tests
-uv run python -m unittest discover tests/python
+uv run python -m unittest discover tests/python -v
 
 # Run specific test
 uv run python -m unittest tests.python.test_voyager_env
@@ -89,18 +90,35 @@ uv run python voyager_env.py
 Skills are TypeScript functions that must follow this pattern:
 
 ```typescript
+import { Transaction, SystemProgram, PublicKey } from '@solana/web3.js';
+
 export async function executeSkill(env: any): Promise<[number, string, string | null]> {
-    // Returns: [reward, done_reason, tx_receipt_json_string]
+    // Build complete transaction with all instructions
+    const tx = new Transaction();
+    tx.add(/* your instructions */);
+    
+    // Serialize to base64
+    const serializedTx = tx.serialize({
+        requireAllSignatures: false,
+        verifySignatures: false
+    }).toString('base64');
+    
+    // Returns: [reward, done_reason, base64_serialized_unsigned_tx]
+    return [1.0, "success", serializedTx];
 }
 ```
 
-Skills are executed in the `skill_runner` environment which provides mocked Solana objects.
+Skills build complete transactions using Solana web3.js and return them as base64 strings.
 
 **Requirements for new skills:**
 - Must include one-paragraph description ≤ 80 tokens
 - Must include unit test in `tests/ts/`
 - Must be TypeScript (no new Python skills allowed)
-- **CRITICAL: Each skill MUST execute exactly ONE transaction**. If you need multiple transactions, create separate skills and chain them together. The return type supports only a single transaction receipt (not an array)
+- **CRITICAL: Each skill MUST create exactly ONE unsigned transaction**
+- Build the complete transaction with all instructions using web3.js
+- Serialize the entire transaction to base64 format
+- Do NOT sign or send the transaction - the environment handles that
+- Multiple operations can be added as instructions to the same transaction
 
 ## Important Implementation Notes
 
@@ -124,6 +142,15 @@ Skills are executed in the `skill_runner` environment which provides mocked Sola
 - `tests/python/test_voyager_env.py`: Example usage patterns
 - `.clinerules/01-project.md`: Critical project rules and migration guidelines
 
+## Surfpool Specific Commands / Flags
+
+- `surfpool start`: Initialize the Surfpool sandbox environment
+- `surfpool status`: Check current status of the Surfpool sandbox
+- `surfpool reset`: Reset the Surfpool sandbox to its initial state
+- `surfpool logs`: View recent logs from the Surfpool service
+- `--fast-mode`: Flag to run Surfpool in accelerated mode with reduced validation
+- `--debug`: Enable verbose debugging for Surfpool interactions
+
 ## AI Model Considerations
 
 - Use OpenRouter when possible over other providers to make it easy to swap out mode
@@ -131,3 +158,7 @@ Skills are executed in the `skill_runner` environment which provides mocked Sola
 ## Milestones
 
 - Complete milestone 3!
+
+## Preferred Commands
+
+- Use `python -m unittest discover tests/python -v` as our main way of running all the tests

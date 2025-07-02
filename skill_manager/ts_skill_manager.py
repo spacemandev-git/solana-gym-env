@@ -42,8 +42,12 @@ class TypeScriptSkillManager:
             f.write(code)
         return file_path
 
-    def execute_skill(self, file_path: str, timeout_ms: int = 10000) -> Dict[str, Any]:
+    def execute_skill(self, file_path: str, timeout_ms: int = 10000, agent_pubkey: str = None, latest_blockhash: str = None) -> Dict[str, Any]:
         command = ["bun", "skill_runner/runSkill.ts", file_path, str(timeout_ms)]
+        if agent_pubkey:
+            command.append(agent_pubkey)
+        if latest_blockhash:
+            command.append(latest_blockhash)
         try:
             result = subprocess.run(
                 command,

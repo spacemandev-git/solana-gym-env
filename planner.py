@@ -45,10 +45,55 @@ This function takes the low-level Solana environment `env` as input.
 The function must return a Promise that resolves to a tuple: `[number, string, string | null]`.
 - First element: A number indicating the reward (e.g., 1.0 for success, 0.0 for failure).
 - Second element: A short string explaining the outcome (e.g., "success", "insufficient_funds").
-- Third element: A JSON string of the transaction receipt, or null if no transaction was made.
+- Third element: A base64-encoded string of the unsigned transaction, or null if no transaction was made.
 
 The env object provides:
-- `env.simulateTransaction(success: boolean, protocol?: string)`: Simulates a transaction and returns a receipt JSON string
+- `env.getWallet()`: Returns wallet information including balances and public key
+- `env.getRecentBlockhash()`: Returns a recent blockhash for the transaction
+- Access to Solana web3.js library for building transactions
+
+You should:
+1. Import necessary Solana libraries (Transaction, SystemProgram, etc.)
+2. Build a complete unsigned transaction with all instructions
+3. Set recentBlockhash and feePayer on the transaction
+4. Serialize it to base64 string
+5. Return the base64 string
+
+**CRITICAL CONSTRAINTS:**
+1. Each skill MUST create exactly ONE unsigned transaction
+2. The transaction should be serialized to base64 format before returning
+3. Do NOT sign or send the transaction - the environment will handle that
+4. If you need multiple operations, add multiple instructions to the same transaction
+5. If operations cannot be combined in one transaction, create SEPARATE skills
+
+Example structure:
+```typescript
+import {{ Transaction, SystemProgram, PublicKey }} from '@solana/web3.js';
+
+export async function executeSkill(env: any): Promise<[number, string, string | null]> {{
+    const wallet = env.getWallet();
+    const tx = new Transaction();
+    
+    // Add your instructions
+    tx.add(SystemProgram.transfer({{
+        fromPubkey: new PublicKey(wallet.publicKey),
+        toPubkey: new PublicKey("..."),
+        lamports: 1000000
+    }}));
+    
+    // Set required transaction fields
+    tx.recentBlockhash = env.getRecentBlockhash();
+    tx.feePayer = new PublicKey(wallet.publicKey);
+    
+    // Serialize the complete unsigned transaction to base64
+    const serializedTx = tx.serialize({{
+        requireAllSignatures: false,
+        verifySignatures: false
+    }}).toString('base64');
+    
+    return [1.0, "success", serializedTx];
+}}
+```
 
 **Environment Observation:**
 ```json
@@ -158,10 +203,31 @@ Focus on interacting with Solana protocols like Jupiter, Meteora, Raydium, etc.
     def _get_dummy_skill(self) -> str:
         """Returns a hardcoded dummy skill for testing without an LLM."""
         return """
+import { Transaction, SystemProgram, PublicKey } from '@solana/web3.js';
+
 export async function executeSkill(env: any): Promise<[number, string, string | null]> {
-    // This is a dummy skill that simulates a simple transfer.
-    const txReceipt = env.simulateTransaction(true, "11111111111111111111111111111111");
-    return [1.0, "simulated_success", txReceipt];
+    // This is a dummy skill that creates an unsigned transaction
+    const wallet = env.getWallet();
+    const tx = new Transaction();
+    
+    // Add a simple transfer instruction (1 lamport to system program)
+    tx.add(SystemProgram.transfer({
+        fromPubkey: new PublicKey(wallet.publicKey),
+        toPubkey: SystemProgram.programId,
+        lamports: 1
+    }));
+    
+    // Set required transaction fields
+    tx.recentBlockhash = env.getRecentBlockhash();
+    tx.feePayer = new PublicKey(wallet.publicKey);
+    
+    // Serialize the complete unsigned transaction to base64
+    const serializedTx = tx.serialize({
+        requireAllSignatures: false,
+        verifySignatures: false
+    }).toString('base64');
+    
+    return [1.0, "created_transfer_tx", serializedTx];
 }
 """
 

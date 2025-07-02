@@ -50,25 +50,39 @@ const surfpoolEnv = {
     // Add getWallet method for compatibility
     getWallet: () => ({
         balances: [2.5, 100.0, 0.0, 0.0, 0.0],
-        publicKey: "11111111111111111111111111111111" // Valid base58 pubkey
+        publicKey: "11111111111111111111111111111111" // System program ID, will be overridden
     }),
     // Add getRecentBlockhash for transaction building
-    getRecentBlockhash: () => "11111111111111111111111111111111",
+    // This will be updated with the real blockhash if provided
+    getRecentBlockhash: () => "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
     // Add other methods as needed to mirror SurfpoolEnv
     read: () => "some data",
     write: (data: string) => console.log(`Skill wrote: ${data}`),
 };
 
 async function runSkill(): Promise<void> {
-    const [, , filePath, timeoutMsStr] = process.argv;
+    const [, , filePath, timeoutMsStr, agentPubkey, latestBlockhash] = process.argv;
 
     if (!filePath || !timeoutMsStr) {
-        console.error('Usage: bun runSkill.ts <file> <timeoutMs>');
+        console.error('Usage: bun runSkill.ts <file> <timeoutMs> [agentPubkey] [latestBlockhash]');
         process.exit(1);
     }
 
     const timeoutMs = parseInt(timeoutMsStr, 10);
     const absolutePath = path.resolve(filePath);
+    
+    // Update the mock environment with real agent pubkey if provided
+    if (agentPubkey) {
+        surfpoolEnv.getWallet = () => ({
+            balances: [2.5, 100.0, 0.0, 0.0, 0.0],
+            publicKey: agentPubkey
+        });
+    }
+    
+    // Update the blockhash if provided
+    if (latestBlockhash) {
+        surfpoolEnv.getRecentBlockhash = () => latestBlockhash;
+    }
 
     // Reset transaction counter for each skill execution
     transactionCount = 0;

@@ -4,7 +4,7 @@ import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 
-const runSkillCommand = "bun run skill_runner/runSkill.ts";
+const runSkillCommand = "bun run ./runSkill.ts";
 
 test("should return success for a passing skill", async () => {
     const { stdout } = await execAsync(`${runSkillCommand} tests/ts/pass.ts 10000`);
