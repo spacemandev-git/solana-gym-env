@@ -29,7 +29,7 @@ jobs:
       run: |
         # Run all tests except known slow ones
         # NOTE: Excluding test_e2e_jupiter_swap_simple.py as it may take >2m
-        uv run python -m unittest discover tests/python -v -k "not test_e2e"
+        PYTHONPATH=. uv run python -m unittest discover tests/python -v -k "not test_e2e"
       timeout-minutes: 5
 
   test-typescript:
@@ -87,5 +87,5 @@ jobs:
       run: |
         # This should verify that a dummy episode achieves reward > 0
         # For now, just run the voyager env test as a smoke test
-        uv run python -m unittest tests.python.test_voyager_env -v
+        PYTHONPATH=. uv run python -m unittest tests.python.test_voyager_env -v
       timeout-minutes: 5
