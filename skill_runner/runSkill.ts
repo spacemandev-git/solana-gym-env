@@ -5,7 +5,7 @@ import path from 'path';
 const execAsync = promisify(exec);
 
 // Define the expected return type from executeSkill in TS skills
-type SkillExecutionResult = [number, string, string | null]; // [reward, done_reason, tx_receipt_json_string]
+type SkillExecutionResult = string;
 
 // Track transaction count for single transaction enforcement
 let transactionCount = 0;
@@ -28,7 +28,7 @@ const surfpoolEnv = {
                 "This transaction attempt was blocked."
             );
         }
-        
+
         // Generate a dummy transaction receipt.
         // In a real scenario, this would come from a Solana RPC call.
         const txReceipt = {
@@ -70,19 +70,26 @@ async function runSkill(): Promise<void> {
 
     const timeoutMs = parseInt(timeoutMsStr, 10);
     const absolutePath = path.resolve(filePath);
-    
-    // Update the mock environment with real agent pubkey if provided
-    if (agentPubkey) {
-        surfpoolEnv.getWallet = () => ({
-            balances: [2.5, 100.0, 0.0, 0.0, 0.0],
-            publicKey: agentPubkey
-        });
-    }
-    
-    // Update the blockhash if provided
-    if (latestBlockhash) {
-        surfpoolEnv.getRecentBlockhash = () => latestBlockhash;
-    }
+
+    // Create the environment object that skills expect
+    // const skillEnv = {
+    //     ...surfpoolEnv,
+    //     agentPubkey: agentPubkey || "11111111111111111111111111111111",
+    //     latestBlockhash: latestBlockhash || "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+    // };
+
+    // // Update the mock environment with real agent pubkey if provided
+    // if (agentPubkey) {
+    //     surfpoolEnv.getWallet = () => ({
+    //         balances: [2.5, 100.0, 0.0, 0.0, 0.0],
+    //         publicKey: agentPubkey
+    //     });
+    // }
+
+    // // Update the blockhash if provided
+    // if (latestBlockhash) {
+    //     surfpoolEnv.getRecentBlockhash = () => latestBlockhash;
+    // }
 
     // Reset transaction counter for each skill execution
     transactionCount = 0;
@@ -94,29 +101,21 @@ async function runSkill(): Promise<void> {
             throw new Error('executeSkill function not found in the provided module.');
         }
 
-        const [reward, done_reason, tx_receipt_json_string]: SkillExecutionResult = await Promise.race([
-            skillModule.executeSkill(surfpoolEnv),
+        const serialized_tx: SkillExecutionResult = await Promise.race([
+            skillModule.executeSkill(),
             new Promise<SkillExecutionResult>((_, reject) =>
                 setTimeout(() => reject(new Error('Skill execution timed out.')), timeoutMs)
             ),
         ]);
 
         console.log(JSON.stringify({
-            success: true,
-            reward,
-            done_reason,
-            tx_receipt_json_string
+            serialized_tx
         }));
     } catch (error) {
         const reason = error instanceof Error ? error.message : 'An unknown error occurred.';
         // For skill execution errors, return a proper error format
-        console.log(JSON.stringify({ 
-            success: false, 
-            reason,
-            reward: 0.0,
-            done_reason: "error",
-            tx_receipt_json_string: null,
-            error: reason
+        console.log(JSON.stringify({
+            serialized_tx: null,
         }));
         process.exit(1);
     }

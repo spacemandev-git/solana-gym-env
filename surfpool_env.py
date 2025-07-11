@@ -104,90 +104,34 @@ class SurfpoolEnv(gym.Env):
         self.agent_keypair = Keypair()
 
         # --- Observation Space ---
-        self.observation_space = spaces.Dict({
-            "wallet_balances": spaces.Box(low=0, high=np.inf, shape=(MAX_TOKENS,), dtype=np.float64),
-            "agent_pubkey": spaces.Box(low=0, high=255, shape=(32,), dtype=np.uint8),
-            "block_height": spaces.Box(low=0, high=np.inf, shape=(1,), dtype=np.int64),
-            "block_timestamp": spaces.Box(low=0, high=np.inf, shape=(1,), dtype=np.int64),
-            "last_tx_success": spaces.Discrete(2),
-            "last_tx_error": spaces.Text(max_length=128),
-            "available_protocols": spaces.Sequence(
-                spaces.Dict({
-                    "protocol_id": spaces.Discrete(NUM_PROTOCOLS),
-                    "address": spaces.Box(low=0, high=255, shape=(32,), dtype=np.uint8),
-                })
-            )
-        })
+        # self.observation_space = spaces.Dict({
+        #     "wallet_balances": spaces.Box(low=0, high=np.inf, shape=(MAX_TOKENS,), dtype=np.float64),
+        #     "agent_pubkey": spaces.Box(low=0, high=255, shape=(32,), dtype=np.uint8),
+        #     "block_height": spaces.Box(low=0, high=np.inf, shape=(1,), dtype=np.int64),
+        #     "block_timestamp": spaces.Box(low=0, high=np.inf, shape=(1,), dtype=np.int64),
+        #     "last_tx_success": spaces.Discrete(2),
+        #     "last_tx_error": spaces.Text(max_length=128),
+        #     "available_protocols": spaces.Sequence(
+        #         spaces.Dict({
+        #             "protocol_id": spaces.Discrete(NUM_PROTOCOLS),
+        #             "address": spaces.Box(low=0, high=255, shape=(32,), dtype=np.uint8),
+        #         })
+        #     )
+        # })
         
         # This action space is a placeholder. The Voyager layer will use its own.
-        self.action_space = spaces.Discrete(1)
+        # self.action_space = spaces.Discrete(1)
         self.last_observation = None
         self.last_tx_receipt = None
         self._validator_cm = None       # will hold the context-manager
         self._validator_proc = None     # the running subprocess.Process
 
 
-    def _start_test_validator(self):
-        pass
-        # logging.info("Starting Solana test validator via surfpool...")
-        # try:
-        #     command = ['surfpool', 'start', '-u', self.rpc_url]
-        #     # Redirect stdout and stderr to DEVNULL to prevent ResourceWarning
-        #     self.test_validator_process = subprocess.Popen(
-        #         command,
-        #         stdout=subprocess.PIPE,
-        #         stderr=subprocess.STDOUT,
-        #     )
-        #     logging.info("Surfpool process started.")
-        # except FileNotFoundError:
-        #     logging.error("Error: 'surfpool' command not found. Please ensure it's installed and in your PATH.")
-        #     self.test_validator_process = None
-        # except Exception as e:
-        #     logging.error(f"Error starting test validator: {e}", exc_info=True)
-        #     self.test_validator_process = None
-
-    async def _wait_for_validator(self):
-        pass
-        # """Polls the RPC endpoint until it's responsive."""
-        # logging.info("Waiting for validator to start...")
-        # for i in range(60):  # 60 seconds timeout
-        #     try:
-        #         await self.client.get_block(0)
-        #         logging.info("Validator is healthy.")
-        #         return
-        #     except Exception:
-        #         await asyncio.sleep(1)
-        # raise RuntimeError("Validator did not start in time.")
-
-    def _stop_test_validator(self):
-        # if self._validator_cm:
-        #     await self._validator_cm.__aexit__(None, None, None)
-        pass
-        # if self.test_validator_process and self.test_validator_process.poll() is None:
-        #     logging.info("Stopping Solana test validator...")
-        #     try:
-        #         self.test_validator_process.terminate()
-        #         try:
-        #             # Reduce timeout for faster test runs
-        #             self.test_validator_process.wait(timeout=2)
-        #             logging.info("Validator process terminated gracefully.")
-        #         except subprocess.TimeoutExpired:
-        #             logging.warning("Validator process did not terminate in time, killing it.")
-        #             self.test_validator_process.kill()
-        #             self.test_validator_process.wait()
-        #             logging.info("Validator process killed.")
-        #     except Exception as e:
-        #         logging.error(f"An error occurred while stopping the validator: {e}", exc_info=True)
-        #         if self.test_validator_process.poll() is None:
-        #             self.test_validator_process.kill()
-        #             self.test_validator_process.wait()
-        #     self.test_validator_process = None
-
     async def _get_observation(self, last_tx_result=None):
         # In a real implementation, you would fetch this data from the chain
         obs = {
             "wallet_balances": np.zeros(MAX_TOKENS, dtype=np.float64),
-            "agent_pubkey": np.frombuffer(self.agent_keypair.pubkey().__bytes__(), dtype=np.uint8),
+            "agent_pubkey": str(self.agent_keypair.pubkey()),
             "block_height": np.array([0], dtype=np.int64),
             "block_timestamp": np.array([0], dtype=np.int64),
             "last_tx_success": 0,
@@ -230,13 +174,6 @@ class SurfpoolEnv(gym.Env):
         # 2. Launch a fresh validator and wait until it’s live
         self._validator_cm = _surfpool_validator(self.rpc_url)
         self._validator_proc = await self._validator_cm.__aenter__()
-        # self._validator_cm = _surfpool_validator(self.rpc_url)
-        # self._validator_proc = await self._validator_cm.__aenter__()
-        # self._stop_test_validator()
-        # self._start_test_validator()
-
-        # Wait for the validator to be ready
-        await self._wait_for_validator()
 
         # Create a new agent for the episode
         self.agent_keypair = Keypair()
@@ -312,9 +249,6 @@ class SurfpoolEnv(gym.Env):
             if self.client:
                 await self.client.close()
             logging.info("SurfpoolEnv closed.")
-        # self._stop_test_validator()
-        # if self.client:
-        #     await self.client.close()
         logging.info("SurfpoolEnv closed.")
 
 if __name__ == '__main__':

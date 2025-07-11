@@ -7,7 +7,7 @@ for transaction complexity analysis.
 
 import json
 from typing import Dict, Any, List, Optional
-from trajectory_tracker import TransactionDetails
+from tracking.trajectory_tracker import TransactionDetails
 
 
 def parse_transaction_receipt(tx_receipt_json: str) -> Optional[TransactionDetails]:

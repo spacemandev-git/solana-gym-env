@@ -96,20 +96,20 @@ export async function executeSkill(env: any): Promise<[number, string, string | 
         self.assertIn("wallet_balances", self.obs)
 
     async def test_run_successful_skill(self):
-        action = 2 # Corresponds to skill_0_transfer.ts
+        action = {"action_type": 3, "program_id": None}  # 3 = len(SPECIALS) + 0, corresponds to skill_0_transfer.ts
         obs, reward, term, trunc, info = await self.env.step(action)
         self.assertAlmostEqual(reward, 1.0, msg=f"Reward should be 1.0, but was {reward}. Info: {info}")
         self.assertEqual(info.get("done_reason"), "SOL transfer simulated successfully.")
 
     async def test_run_failing_skill(self):
-        action = 3 # Corresponds to skill_1_fail.ts
+        action = {"action_type": 4, "program_id": None}  # 4 = len(SPECIALS) + 1, corresponds to skill_1_fail.ts
         obs, reward, term, trunc, info = await self.env.step(action)
         self.assertEqual(reward, 0.0, msg=f"Reward should be 0.0 for a failed skill, but was {reward}. Info: {info}")
         self.assertIn("intended to fail", info.get("done_reason", "")) # Check done_reason for failure message
 
     async def test_jupiter_swap_reward_bonus(self):
         # The skill itself returns 0, but the env adds a 1.0 bonus for new protocol
-        action = 4 # Corresponds to skill_2_jupiter.ts
+        action = {"action_type": 5, "program_id": None}  # 5 = len(SPECIALS) + 2, corresponds to skill_2_jupiter.ts
         obs, reward, term, trunc, info = await self.env.step(action)
         self.assertAlmostEqual(reward, 1.0, msg=f"Reward should be ~1.0 for the first Jupiter tx, but was {reward}. Info: {info}")
         self.assertIn("Jupiter", info.get("protocols_interacted", []))
@@ -122,7 +122,7 @@ export async function executeSkill(env: any): Promise<[number, string, string | 
     async def test_multi_protocol_reward_bonus(self):
         # No need to modify KNOWN_PROGRAM_IDS here, it's loaded from CSV
         
-        action = 5 # Corresponds to skill_3_multi_protocol.ts
+        action = {"action_type": 6, "program_id": None}  # 6 = len(SPECIALS) + 3, corresponds to skill_3_multi_protocol.ts
         obs, reward, term, trunc, info = await self.env.step(action)
         # Expected: 0.0 (skill) + 1.0 (Jupiter) + 1.0 (Meteora) = 2.0
         self.assertAlmostEqual(reward, 2.0, msg=f"Reward should be ~2.0 for multi-protocol tx, but was {reward}. Info: {info}")
@@ -138,11 +138,30 @@ export async function executeSkill(env: any): Promise<[number, string, string | 
         self.assertAlmostEqual(reward, 0.0, msg=f"Reward should be 0.0 on second multi-protocol tx, but was {reward}. Info: {info}")
 
     async def test_grow_skill_dummy(self):
-        action = 0 # NEW_SKILL
+        action = {"action_type": 0, "program_id": None}  # 0 = NEW_SKILL
         obs, reward, term, trunc, info = await self.env.step(action)
         self.assertEqual(reward, 1.0) # Expect 1.0 reward for successful skill creation
         self.assertEqual(info.get("status"), "success")
         self.assertIn("new_skill_id", info)
+    
+    async def test_fetch_tx_examples_no_program(self):
+        # Test fetching without specifying a program
+        action = {"action_type": 2, "program_id": None}  # 2 = FETCH_TX_EXAMPLES
+        obs, reward, term, trunc, info = await self.env.step(action)
+        self.assertEqual(reward, 0.0)  # No reward for fetching
+        self.assertIn("error", info)
+        self.assertIn("No program_id specified", info["error"])
+    
+    async def test_fetch_tx_examples_with_program(self):
+        # Test fetching with a specific program (Jupiter)
+        action = {"action_type": 2, "program_id": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"}  # 2 = FETCH_TX_EXAMPLES
+        obs, reward, term, trunc, info = await self.env.step(action)
+        self.assertEqual(reward, 0.0)  # No reward for fetching
+        # This will likely fail in test environment without real RPC, but structure should be correct
+        if info.get("status") == "success":
+            self.assertIn("examples", info)
+            self.assertIn("count", info)
+            self.assertIn("program_id", info)
 
 if __name__ == "__main__":
     # This allows running the tests with `python tests.py`

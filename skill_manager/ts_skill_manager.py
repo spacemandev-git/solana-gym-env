@@ -1,6 +1,7 @@
 import subprocess
 import json
 import os
+import pdb
 from typing import Any, Dict
 
 class TypeScriptSkillManager:
@@ -56,13 +57,15 @@ class TypeScriptSkillManager:
                 check=True,
                 encoding='utf-8'
             )
-            # runSkill.ts now outputs a JSON object with reward, done_reason, tx_receipt_json_string
-            return json.loads(result.stdout)
+            pdb.set_trace()
+            # runSkill.ts now outputs a JSON object with tx_receipt_json_string
+            return json.loads(result.stdout.strip("\n"))
         except subprocess.CalledProcessError as e:
+            pdb.set_trace()
             # If runSkill.ts exits with an error, it prints the JSON result to stderr
             try:
                 # The error output might also be a JSON object if the skill itself failed gracefully
-                return json.loads(e.stderr)
+                return json.loads(e.stderr.strip("\n"))
             except json.JSONDecodeError:
                 # Fallback for unexpected stderr output
                 return {"success": False, "reason": f"Skill runner error: {e.stderr}"}

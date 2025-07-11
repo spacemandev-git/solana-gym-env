@@ -159,6 +159,59 @@ Skills build complete transactions using Solana web3.js and return them as base6
 
 - Complete milestone 3!
 
+## Current Debugging Focus
+
+### Goal: Ensure agents are learning from on-chain transactions
+
+We want to verify that agents are:
+1. **Fetching transaction examples** - Using the FETCH_TX_EXAMPLES special action to get real transactions for target programs
+2. **Inspecting transaction details** - Looking at logs, instructions, and patterns to understand how to interact with programs
+3. **Learning from errors** - When transactions fail (e.g., "8 byte instruction identifier not provided" for Anchor programs), agents should analyze the error and adjust
+
+### Key Areas to Debug:
+
+1. **Transaction Fetching**
+   - Verify agents actually call FETCH_TX_EXAMPLES before attempting to interact with new programs
+   - Ensure fetched examples are passed to the planner for context
+   - Check that transaction logs (up to 10KB) are fully preserved and analyzed
+
+2. **Protocol Discovery** 
+   - Confirm the protocol labeler correctly identifies ALL programs in a transaction
+   - Verify exploration bonuses are awarded for discovering new protocols
+   - Track which protocols have been discovered across episodes
+
+3. **Skill Generation**
+   - Ensure skills use patterns learned from fetched examples
+   - Verify Anchor discriminators are correctly extracted and used
+   - Check that agents build complete transactions with all required instructions
+
+4. **Demo Rollouts**
+   - System Program: Agent should discover multiple instructions (transfer, createAccount, allocate, etc.)
+   - Token Program: Agent should learn to create ATAs before attempting transfers
+   - DeFi protocols: Agent should learn proper instruction ordering and discriminators
+
+### Testing Strategy:
+
+1. Run demos with enhanced logging to track:
+   - When FETCH_TX_EXAMPLES is called
+   - What examples are returned
+   - How the planner uses fetched examples
+   - What skills are generated
+
+2. Create test trajectories that show:
+   - Agent fetching examples → learning patterns → successful interaction
+   - Protocol discovery working correctly
+   - Skills improving over time based on learned patterns
+
 ## Preferred Commands
 
 - Use `python -m unittest discover tests/python -v` as our main way of running all the tests
+
+## Next Steps
+
+- Write up learnings and highlight the key insights and roadmap for the mission:
+  - Verify complete learning trajectory from transaction fetching to skill generation
+  - Enhance protocol discovery mechanisms
+  - Build more robust error analysis and correction strategies
+  - Develop comprehensive test suites that validate learning progression
+  - Explore potential machine learning optimizations for faster agent adaptation

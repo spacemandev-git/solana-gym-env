@@ -5,11 +5,17 @@ import logging
 import traceback
 import json
 import shutil
-from typing import Set, Dict, Any
+import base58
+import base64
+from typing import List, Set, Dict, Any
+import pdb
 
 from surfpool_env import SurfpoolEnv
 from skill_manager.ts_skill_manager import TypeScriptSkillManager
-from planner import LLMPlanner
+from enhanced_planner import EnhancedLLMPlanner
+from solders.pubkey import Pubkey
+from solana.rpc.async_api import AsyncClient
+from solders.transaction import Transaction
 
 # --- Constants ---
 CONFIG_MAX_LLM_SKILL_TRIES = 3
@@ -48,30 +54,43 @@ class SolanaVoyagerEnv(gym.Env):
     """
     metadata = {"render_modes": ["human"]}
     
-    SPECIALS = {"NEW_SKILL": 0, "INSPECT_LIB": 1}
+    SPECIALS = {"NEW_SKILL": 0, "INSPECT_LIB": 1, "FETCH_TX_EXAMPLES": 2}
 
-    def __init__(self, max_steps: int = 128, skill_root: str = "./skills"):
+    def __init__(self, max_steps: int = 128, skill_root: str = "./skills", protocols: List[str] = None):
         # Layer 0: The low-level Solana environment
         self.solana_env = SurfpoolEnv()
         self.observation_space = self.solana_env.observation_space
 
         # Layer 1: Voyager components
         self.skills = TypeScriptSkillManager(skill_root=skill_root)
-        self.planner = LLMPlanner(self.skills)
+        self.planner = EnhancedLLMPlanner(self.skills, agent_pubkey=str(self.solana_env.agent_keypair.pubkey()), protocols=protocols)
 
-        # RL view of the world
-        self.action_space = gym.spaces.Discrete(len(self.skills) + len(self.SPECIALS))
+        # RL view of the world - Dict action space
+        self.action_space = gym.spaces.Dict({
+            "action_type": gym.spaces.Discrete(len(self.skills) + len(self.SPECIALS)),
+            "program_id": gym.spaces.Text(max_length=44)  # Base58 program address
+        })
         
         self.max_steps = max_steps
         self.t = 0
         
         # Tracking for the voyager-style reward
         self.protocols_seen: Set[str] = set()
+        # Track unique instructions per program for instruction-level rewards
+        # Format: {program_id: {instruction_discriminator, ...}}
+        self.program_instructions_seen: Dict[str, Set[str]] = {}
+        
+        # Separate RPC client for fetching transaction details (can use mainnet)
+        # This allows us to fetch real transaction examples even in local surfpool
+        self.tx_fetch_rpc_url = os.getenv("SOLANA_TX_FETCH_RPC_URL", "https://api.mainnet-beta.solana.com")
+        self.tx_fetch_client = AsyncClient(self.tx_fetch_rpc_url)
 
     def _update_action_space(self):
         """Updates the action space to reflect the current number of skills."""
-        num_actions = len(self.skills) + len(self.SPECIALS)
-        self.action_space = gym.spaces.Discrete(num_actions)
+        self.action_space = gym.spaces.Dict({
+            "action_type": gym.spaces.Discrete(len(self.skills) + len(self.SPECIALS)),
+            "program_id": gym.spaces.Text(max_length=44)  # Base58 program address
+        })
 
     def _protocol_labeler(self, tx_receipt: Dict[str, Any]) -> list[str]:
         """
@@ -117,6 +136,86 @@ class SolanaVoyagerEnv(gym.Env):
 
         return protocols_found
 
+    def _extract_instruction_discriminators(self, tx_receipt: Dict[str, Any]) -> Dict[str, Set[str]]:
+        """
+        Extracts unique instruction discriminators (first 8 bytes) for each program
+        from a transaction receipt. Returns a dict mapping program_id to set of discriminators.
+        """
+        if not tx_receipt:
+            return {}
+        
+        program_discriminators = {}
+        
+        try:
+            # Get account keys
+            account_keys = tx_receipt.get("transaction", {}).get("message", {}).get("accountKeys", [])
+            if not account_keys:
+                return {}
+            
+            # Process all instructions
+            instructions = tx_receipt.get("transaction", {}).get("message", {}).get("instructions", [])
+            
+            for instruction in instructions:
+                program_id_index = instruction.get("programIdIndex")
+                if program_id_index is not None and program_id_index < len(account_keys):
+                    program_id = account_keys[program_id_index]
+                    
+                    # Get instruction data (base64 encoded when encoding="json")
+                    data_str = instruction.get("data", "")
+                    if data_str and len(data_str) > 0:
+                        try:
+                            # Try base64 first (for JSON encoding)
+                            try:
+                                import base64
+                                data_bytes = base64.b64decode(data_str)
+                            except:
+                                # Fall back to base58 (for base58 encoding)
+                                data_bytes = base58.b58decode(data_str)
+                            
+                            if len(data_bytes) > 0:
+                                # Use first byte as discriminator (could extend to 8 bytes for Anchor)
+                                discriminator = data_bytes[0:1].hex()
+                                
+                                if program_id not in program_discriminators:
+                                    program_discriminators[program_id] = set()
+                                program_discriminators[program_id].add(discriminator)
+                        except Exception as e:
+                            logging.debug(f"Failed to decode instruction data: {e}")
+            
+            # Also process inner instructions if available
+            inner_instructions = tx_receipt.get("meta", {}).get("innerInstructions", [])
+            for inner_group in inner_instructions:
+                if isinstance(inner_group, dict) and "instructions" in inner_group:
+                    for inner_ix in inner_group["instructions"]:
+                        program_id_index = inner_ix.get("programIdIndex")
+                        if program_id_index is not None and program_id_index < len(account_keys):
+                            program_id = account_keys[program_id_index]
+                            
+                            data_str = inner_ix.get("data", "")
+                            if data_str and len(data_str) > 0:
+                                try:
+                                    # Try base64 first (for JSON encoding)
+                                    try:
+                                        import base64
+                                        data_bytes = base64.b64decode(data_str)
+                                    except:
+                                        # Fall back to base58 (for base58 encoding)
+                                        data_bytes = base58.b58decode(data_str)
+                                    
+                                    if len(data_bytes) > 0:
+                                        discriminator = data_bytes[0:1].hex()
+                                        
+                                        if program_id not in program_discriminators:
+                                            program_discriminators[program_id] = set()
+                                        program_discriminators[program_id].add(discriminator)
+                                except Exception as e:
+                                    logging.debug(f"Failed to decode inner instruction data: {e}")
+                    
+        except Exception as e:
+            logging.error(f"Error extracting instruction discriminators: {e}")
+        
+        return program_discriminators
+
     async def _grow_skill(self):
         """
         Generates, tests, and registers a new skill with a retry mechanism.
@@ -125,6 +224,7 @@ class SolanaVoyagerEnv(gym.Env):
             return 0.0, {"error": "Cannot grow skill without an observation"}
 
         last_error = None
+        
         for i in range(CONFIG_MAX_LLM_SKILL_TRIES):
             logging.info(f"Attempt {i+1}/{CONFIG_MAX_LLM_SKILL_TRIES} to generate a skill...")
             
@@ -140,15 +240,21 @@ class SolanaVoyagerEnv(gym.Env):
                 result = self.skills.execute_skill(file_path, agent_pubkey=agent_pubkey)
                 logging.info(f"Skill test result: {result}")
 
-                if result.get("success"):
-                    skill_id = self.skills.register(skill_code)
-                    self._update_action_space()
-                    info = {"new_skill_id": skill_id, "status": "success"}
-                    return 1.0, info # Reward for successfully growing a skill
-                else:
-                    last_error = f"Skill executed but failed. Reason: {result.get('reason')}"
+                try:
+                    serialized_tx = result['serialized_tx']
+                    tx = Transaction.from_bytes(base64.b64decode(serialized_tx))
+                except Exception as e:
+                    logging.error(f"Error deserializing transaction: {e}")
+                    last_error = f"Skill executed but failed. Reason: Error deserializing transaction: {e}"
+                    continue
+
+                skill_id = self.skills.register(skill_code)
+                self._update_action_space()
+                info = {"new_skill_id": skill_id, "status": "success"}
+                return 0.0, info
 
             except Exception as e:
+                pdb.set_trace()
                 logging.error(f"Runtime error in generated skill: {e}")
                 last_error = f"Runtime error: {traceback.format_exc()}"
         
@@ -163,6 +269,131 @@ class SolanaVoyagerEnv(gym.Env):
         info = {"num_skills": len(self.skills)}
         # No reward for just looking.
         return 0.0, info
+
+    async def _fetch_transaction_examples(self, program_id: str = None):
+        """Fetches example transactions for a specific program."""
+        if not program_id:
+            return 0.0, {"error": "No program_id specified. Please provide a program_id."}
+        
+        logging.info(f"=== FETCH_TX_EXAMPLES called for program: {program_id} ===")
+        program_name = KNOWN_PROGRAM_IDS.get(program_id, "Unknown")
+        logging.info(f"Program name: {program_name}")
+        
+        try:
+            # Fetch recent transactions from the tx fetch RPC (e.g., mainnet)
+            # This allows us to get real transaction examples even in local surfpool
+            logging.info(f"Fetching signatures from: {self.tx_fetch_rpc_url}")
+            signatures = await self.tx_fetch_client.get_signatures_for_address(
+                Pubkey.from_string(program_id),
+                limit=10  # Limit to avoid too many requests
+            )
+            
+            logging.info(f"Found {len(signatures.value)} signatures")
+            
+            examples = []
+            # Only process first 3 transactions to avoid timeouts
+            for i, sig_info in enumerate(signatures.value[:3]):
+                try:
+                    logging.info(f"Fetching transaction {i+1}/3: {sig_info.signature}")
+                    tx = await self.tx_fetch_client.get_transaction(
+                        sig_info.signature,
+                        encoding="json",
+                        max_supported_transaction_version=0
+                    )
+                    
+                    if tx and tx.value:
+                        logging.info(f"Successfully fetched transaction {i+1}")
+                        # Extract ALL logs - no truncation
+                        logs = tx.value.transaction.meta.log_messages or []
+                        
+                        # Parse ALL instructions (outer + inner) with proper indexing
+                        instructions = []
+                        
+                        # Parse outer instructions
+                        outer_ixs = tx.value.transaction.transaction.message.instructions or []
+                        for outer_idx, ix in enumerate(outer_ixs):
+                            instructions.append({
+                                "id": str(outer_idx),
+                                "program_id_index": ix.program_id_index,
+                                "accounts": ix.accounts,
+                                "data": ix.data,
+                                "depth": 0
+                            })
+                    
+                        # Parse inner instructions
+                        inner_ixs = tx.value.transaction.meta.inner_instructions or []
+                        for outer_idx, inner_group in enumerate(inner_ixs):
+                            if inner_group and inner_group.instructions:
+                                for inner_idx, inner_ix in enumerate(inner_group.instructions):
+                                    instructions.append({
+                                        "id": f"{outer_idx}.{inner_idx}",
+                                        "program_id_index": inner_ix.program_id_index,
+                                        "accounts": inner_ix.accounts,
+                                        "data": inner_ix.data,
+                                        "depth": 1
+                                    })
+                    
+                        # Sort instructions by execution order
+                        # This ensures "0", "0.0", "0.1", "1", "1.0", "2" ordering
+                        instructions.sort(key=lambda x: [int(part) for part in x["id"].split(".")])
+                        
+                        examples.append({
+                            "signature": str(sig_info.signature),
+                            "success": tx.value.transaction.meta.err is None,
+                            "error": tx.value.transaction.meta.err,
+                            "logs": logs,  # ALL logs, no limit
+                            "instructions": instructions,  # Sorted by execution order
+                            "accounts": tx.value.transaction.transaction.message.account_keys,
+                            "slot": tx.value.slot,
+                        })
+                except Exception as e:
+                    logging.warning(f"Failed to fetch transaction {i+1}: {e}")
+                    # Continue with next transaction
+                    continue
+            
+            info = {
+                "program_id": program_id,
+                "program_name": KNOWN_PROGRAM_IDS.get(program_id, "Unknown"),
+                "examples": examples,
+                "count": len(examples),
+                "status": "success"
+            }
+            
+            # Store in environment for next skill generation
+            self.last_fetched_examples = examples
+            self.last_fetched_program = program_id
+            
+            logging.info(f"Successfully fetched {len(examples)} examples")
+            if examples:
+                # Log summary of what was found
+                successful_txs = sum(1 for ex in examples if ex['success'])
+                failed_txs = len(examples) - successful_txs
+                logging.info(f"Transaction breakdown: {successful_txs} successful, {failed_txs} failed")
+                
+                # Log unique instruction patterns found
+                unique_instructions = set()
+                for ex in examples:
+                    for ix in ex['instructions']:
+                        unique_instructions.add(f"depth={ix['depth']}")
+                logging.info(f"Instruction patterns found: {unique_instructions}")
+                
+                # Log first example's error (if any) for learning
+                for ex in examples:
+                    if ex.get('error'):
+                        logging.info(f"Example error to learn from: {ex['error']}")
+                        break
+            
+            logging.info("Examples stored for next skill generation")
+            
+            return 0.0, info  # No reward for fetching
+            
+        except Exception as e:
+            logging.error(f"Error fetching transactions: {e}")
+            logging.error(f"Exception type: {type(e)}")
+            logging.error(f"Exception details: {repr(e)}")
+            import traceback
+            logging.error(f"Traceback: {traceback.format_exc()}")
+            return 0.0, {"error": f"Failed to fetch transactions: {str(e)}"}
 
     async def _run_skill(self, skill_id: int):
         """
@@ -181,24 +412,15 @@ class SolanaVoyagerEnv(gym.Env):
             agent_pubkey = str(self.solana_env.agent_keypair.pubkey())
             
             # Fetch latest blockhash before skill execution
-            latest_blockhash_str = None
-            try:
-                blockhash_resp = await self.solana_env.client.get_latest_blockhash()
-                latest_blockhash_str = str(blockhash_resp.value.blockhash)
-            except Exception as e:
-                logging.warning(f"Failed to fetch blockhash for skill: {e}")
-                latest_blockhash_str = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+            blockhash_resp = await self.solana_env.client.get_latest_blockhash()
+            latest_blockhash_str = str(blockhash_resp.value.blockhash)
             
             result = self.skills.execute_skill(file_path, agent_pubkey=agent_pubkey, latest_blockhash=latest_blockhash_str)
-            info["done_reason"] = result.get("reason", result.get("done_reason"))
-            if result.get("success"):
-                base_reward = result.get("reward", 1.0) # Use reward from skill if provided
-            else:
-                base_reward = 0.0 # No base reward for failed skill execution
+            base_reward = 0.0 # No base reward for failed skill execution
             
             # Get transaction data from skill result
             # Note: tx_receipt_json_string is now a base64-encoded unsigned transaction
-            tx_data = result.get("tx_receipt_json_string")
+            tx_data = result.get("serialized_tx")
         except Exception as e:
             logging.error(f"Error running skill {skill_id}: {e}")
             info["error"] = f"Exception in skill {skill_id}: {e}"
@@ -210,7 +432,6 @@ class SolanaVoyagerEnv(gym.Env):
         if tx_data:
             try:
                 # Handle base64 transaction
-                import base64
                 from solders.transaction import Transaction
                 
                 # Decode the base64 transaction
@@ -219,13 +440,9 @@ class SolanaVoyagerEnv(gym.Env):
                 
                 # Sign with agent keypair
                 # Fetch the latest blockhash from surfpool
-                from solders.hash import Hash
-                try:
-                    blockhash_resp = await self.solana_env.client.get_latest_blockhash()
-                    latest_blockhash = blockhash_resp.value.blockhash
-                except Exception as e:
-                    logging.warning(f"Failed to fetch latest blockhash: {e}. Using fallback.")
-                    latest_blockhash = Hash.from_string("4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi")
+                blockhash_resp = await self.solana_env.client.get_latest_blockhash()
+                latest_blockhash = blockhash_resp.value.blockhash
+                pdb.set_trace()
                 
                 tx.sign([self.solana_env.agent_keypair], latest_blockhash)
                 
@@ -266,28 +483,62 @@ class SolanaVoyagerEnv(gym.Env):
                         final_reward += 1.0
                     else:
                         logging.info(f"Already interacted with {proto}. No bonus.")
+            
+            # Extract and reward new instruction discriminators
+            program_instructions = self._extract_instruction_discriminators(receipt)
+            if program_instructions:
+                info["program_instructions"] = {}
+                for program_id, discriminators in program_instructions.items():
+                    # Initialize tracking for this program if needed
+                    if program_id not in self.program_instructions_seen:
+                        self.program_instructions_seen[program_id] = set()
+                    
+                    # Check for new instructions
+                    new_instructions = discriminators - self.program_instructions_seen[program_id]
+                    if new_instructions:
+                        program_name = KNOWN_PROGRAM_IDS.get(program_id, program_id[:8] + "...")
+                        logging.info(f"New instructions discovered for {program_name}: {new_instructions}")
+                        
+                        # Add instruction-level rewards
+                        for new_instr in new_instructions:
+                            self.program_instructions_seen[program_id].add(new_instr)
+                            final_reward += 0.5  # 0.5 reward per new instruction
+                            logging.info(f"  +0.5 reward for new instruction: {new_instr}")
+                        
+                        info["program_instructions"][program_id] = {
+                            "new": list(new_instructions),
+                            "total_seen": len(self.program_instructions_seen[program_id])
+                        }
         
         return final_reward, info
 
     async def reset(self, *, seed=None, options=None):
         self.t = 0
         self.protocols_seen.clear()
+        self.program_instructions_seen.clear()
         return await self.solana_env.reset(seed=seed, options=options)
 
-    async def step(self, action: int):
+    async def step(self, action):
         self.t += 1
         info = {}
         extrinsic_reward = 0.0
-        logging.info(f"--- Step {self.t}: Received action {action} ---")
+        
+        # Extract action components
+        action_type = action["action_type"]
+        program_id = action.get("program_id", None)
+        
+        logging.info(f"--- Step {self.t}: Action type {action_type}, program_id: {program_id} ---")
 
-        if action == self.SPECIALS["NEW_SKILL"]:
+        if action_type == self.SPECIALS["NEW_SKILL"]:
             extrinsic_reward, info = await self._grow_skill()
-        elif action == self.SPECIALS["INSPECT_LIB"]:
+        elif action_type == self.SPECIALS["INSPECT_LIB"]:
             extrinsic_reward, info = self._summarise_library()
+        elif action_type == self.SPECIALS["FETCH_TX_EXAMPLES"]:
+            extrinsic_reward, info = await self._fetch_transaction_examples(program_id)
         else:
             # The action space is the number of specials + the number of skills.
             # So, the skill_id is the action minus the number of specials.
-            skill_id = action - len(self.SPECIALS)
+            skill_id = action_type - len(self.SPECIALS)
             logging.info(f"Executing skill ID: {skill_id}")
             extrinsic_reward, info = await self._run_skill(skill_id)
 
@@ -303,6 +554,8 @@ class SolanaVoyagerEnv(gym.Env):
 
     async def close(self):
         await self.solana_env.close()
+        if hasattr(self, 'tx_fetch_client'):
+            await self.tx_fetch_client.close()
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -319,14 +572,15 @@ if __name__ == '__main__':
 
         # 1. First action: Create a new skill
         logging.info("\n--- Step 1: Creating a new skill ---")
-        obs, reward, term, trunc, info = await env.step(env.SPECIALS["NEW_SKILL"])
+        action = {"action_type": env.SPECIALS["NEW_SKILL"], "program_id": None}
+        obs, reward, term, trunc, info = await env.step(action)
         logging.info(f"Action: NEW_SKILL, Reward: {reward}, Info: {info}")
         
         # 2. Second action: Execute the newly created skill
         logging.info("\n--- Step 2: Executing the new skill ---")
         if 'new_skill_id' in info:
             skill_to_run = info['new_skill_id']
-            action = len(env.SPECIALS) + skill_to_run
+            action = {"action_type": len(env.SPECIALS) + skill_to_run, "program_id": None}
             logging.info(f"\n--- Step 2: Executing skill {skill_to_run} with action {action} ---")
             obs, reward, term, trunc, info = await env.step(action)
             logging.info(f"Result of executing skill {skill_to_run} -> Reward: {reward}, Info: {info}")

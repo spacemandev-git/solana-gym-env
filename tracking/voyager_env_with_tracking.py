@@ -12,15 +12,15 @@ import logging
 from typing import Optional, Dict, Any, Tuple
 
 from voyager_env import SolanaVoyagerEnv
-from trajectory_tracker import TrajectoryTracker
-from transaction_parser import parse_transaction_receipt
+from tracking.trajectory_tracker import TrajectoryTracker
+from tracking.transaction_parser import parse_transaction_receipt
 
 
 class VoyagerEnvWithTracking(SolanaVoyagerEnv):
     """Voyager environment with integrated trajectory and transaction tracking."""
     
-    def __init__(self, max_steps: int = 128, skill_root: str = "./skills", enable_tracking=True):
-        super().__init__(max_steps=max_steps, skill_root=skill_root)
+    def __init__(self, max_steps: int = 128, skill_root: str = "./skills", enable_tracking=True, **kwargs):
+        super().__init__(max_steps=max_steps, skill_root=skill_root, **kwargs)
         
         self.enable_tracking = enable_tracking
         self.tracker = TrajectoryTracker() if enable_tracking else None
@@ -75,7 +75,7 @@ class VoyagerEnvWithTracking(SolanaVoyagerEnv):
         final_reward, info = await super()._run_skill(skill_id)
         
         # Extract relevant information for tracking
-        skill_name = self.skills.get_skill_name(skill_id) if skill_id < len(self.skills.skills) else f"skill_{skill_id}"
+        skill_name = f"skill_{skill_id}"  # Simple name since TypeScriptSkillManager doesn't have get_skill_name
         done_reason = info.get("done_reason", "unknown")
         protocols_discovered = info.get("protocols_interacted", [])
         

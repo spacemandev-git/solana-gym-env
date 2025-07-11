@@ -2,9 +2,11 @@ import os
 import logging
 import json
 import requests
+from openai import OpenAI
 from dotenv import load_dotenv
 from skill_manager.ts_skill_manager import TypeScriptSkillManager
 from typing import Dict, Any, Optional
+import pdb
 
 # Load environment variables
 load_dotenv()
@@ -17,8 +19,13 @@ class LLMPlanner:
     """
     def __init__(self, skill_manager: TypeScriptSkillManager, model: str = None):
         self.skill_manager = skill_manager
-        self.model = model or os.environ.get("OPENROUTER_MODEL", "google/gemini-2.0-flash-exp:free")
+        logging.info(f"LLMPlanner: Using model {model}")
+        self.model = model or os.environ.get("OPENROUTER_MODEL", "google/gemma-3n-e2b-it:free")
         self.api_key = os.environ.get("OPENROUTER_API_KEY")
+        self.client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=self.api_key
+        )
         
         if not self.api_key:
             logging.warning("LLMPlanner: OPENROUTER_API_KEY not found in environment. Skill generation will use dummy skills.")
@@ -39,8 +46,7 @@ class LLMPlanner:
 You are an expert Solana developer and an AI agent inside a reinforcement learning environment.
 Your goal is to write a TypeScript module that exports a new "skill" for the agent to perform.
 
-The module must contain a single asynchronous function `executeSkill(env: any)`.
-This function takes the low-level Solana environment `env` as input.
+The module must contain a single asynchronous function `executeSkill()`.
 
 The function must return a Promise that resolves to a tuple: `[number, string, string | null]`.
 - First element: A number indicating the reward (e.g., 1.0 for success, 0.0 for failure).
@@ -70,8 +76,7 @@ Example structure:
 ```typescript
 import {{ Transaction, SystemProgram, PublicKey }} from '@solana/web3.js';
 
-export async function executeSkill(env: any): Promise<[number, string, string | null]> {{
-    const wallet = env.getWallet();
+export async function executeSkill(): Promise<string> {{
     const tx = new Transaction();
     
     // Add your instructions
@@ -91,7 +96,7 @@ export async function executeSkill(env: any): Promise<[number, string, string | 
         verifySignatures: false
     }}).toString('base64');
     
-    return [1.0, "success", serializedTx];
+    return serializedTx;
 }}
 ```
 
@@ -141,22 +146,14 @@ Focus on interacting with Solana protocols like Jupiter, Meteora, Raydium, etc.
         if app_name:
             headers["X-Title"] = app_name
         
-        data = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.7,
-        }
-        
         try:
-            response = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json=data
+            pdb.set_trace()
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
             )
-            response.raise_for_status()
-            
-            result = response.json()
-            return result['choices'][0]['message']['content']
+            return response.choices[0].message.content
             
         except requests.exceptions.RequestException as e:
             logging.error(f"LLMPlanner: Error calling OpenRouter API: {e}")
@@ -180,6 +177,7 @@ Focus on interacting with Solana protocols like Jupiter, Meteora, Raydium, etc.
         
         logging.info(f"LLMPlanner: Querying {self.model} for a new skill...")
         skill_code = self._call_openrouter(prompt)
+        pdb.set_trace()
         
         if skill_code:
             # Extract code from markdown if present
@@ -205,9 +203,8 @@ Focus on interacting with Solana protocols like Jupiter, Meteora, Raydium, etc.
         return """
 import { Transaction, SystemProgram, PublicKey } from '@solana/web3.js';
 
-export async function executeSkill(env: any): Promise<[number, string, string | null]> {
+export async function executeSkill(): Promise<string> {
     // This is a dummy skill that creates an unsigned transaction
-    const wallet = env.getWallet();
     const tx = new Transaction();
     
     // Add a simple transfer instruction (1 lamport to system program)
@@ -227,7 +224,7 @@ export async function executeSkill(env: any): Promise<[number, string, string | 
         verifySignatures: false
     }).toString('base64');
     
-    return [1.0, "created_transfer_tx", serializedTx];
+    return serializedTx;
 }
 """
 
