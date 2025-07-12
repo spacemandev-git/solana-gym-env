@@ -1,26 +1,19 @@
+import base58
 import gymnasium as gym
 import numpy as np
-import subprocess
 import asyncio
 from contextlib import asynccontextmanager
 import logging
 import json
-from typing import Optional, Callable, Set
-from pathlib import Path
 import shutil
 import os
 import signal
 
-
-from gymnasium import spaces
-from solana.rpc.api import Client as RpcClient
-from solana.rpc.async_api import AsyncClient
+from solana.rpc.async_api import AsyncClient, GetTransactionResp
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 from solders.system_program import transfer, TransferParams
 from solders.message import MessageV0
-from solders.hash import Hash
-from solders.pubkey import Pubkey
 
 # TODO: These should be configured based on the specific protocols and tokens
 MAX_TOKENS = 10  # Maximum number of different tokens in the wallet
@@ -121,6 +114,7 @@ class SurfpoolEnv(gym.Env):
         
         # This action space is a placeholder. The Voyager layer will use its own.
         # self.action_space = spaces.Discrete(1)
+        self.program_instructions_seen = {}
         self.last_observation = None
         self.last_tx_receipt = None
         self._validator_cm = None       # will hold the context-manager
@@ -220,7 +214,7 @@ class SurfpoolEnv(gym.Env):
             logging.error(f"Error sending transaction: {e}", exc_info=True)
             obs = await self._get_observation()
             # Pass the error in the info dict
-            return obs, None, True, {"error": str(e)}
+            return obs, 0, False, False, {"error": str(e)}
         except BaseException as e:
             logging.error(f"Panic in send_transaction: {e}", exc_info=True)
             obs = await self._get_observation()
@@ -229,14 +223,47 @@ class SurfpoolEnv(gym.Env):
             if "missing field `data`" in str(e):
                 # This is likely a parsing issue with the response
                 # The transaction might have actually succeeded
-                return obs, None, False, {"error": str(e), "possible_success": True}
-            return obs, None, True, {"error": str(e)}
+                return obs, 0, False, False, {"error": str(e), "possible_success": True}
+            return obs, 0, False, False, {"error": str(e)}
 
         self.last_tx_receipt = tx_receipt
         obs = await self._get_observation(last_tx_result=tx_receipt)
         
-        return obs, tx_receipt, False, {}
+        return obs, self._get_reward(result), False, False, { "tx_sig": sig.value, "tx_meta": result.value }
 
+    def _get_ordered_instructions(self, tx_result: GetTransactionResp) -> list[dict[str, bytes]]:
+        inner_instructions = {ix.index: ix.instructions for ix in tx_result.value.transaction.meta.inner_instructions}
+        message = tx_result.value.transaction.transaction.message
+        ordered_instructions = []
+        for idx, ix in enumerate(message.instructions):
+            ordered_instructions.append({
+                'program_id': message.account_keys[ix.program_id_index],
+                'data': base58.b58decode(ix.data),
+            })
+            ordered_instructions.extend(
+                [{
+                    'program_id': message.account_keys[inner_instruction.program_id_index],
+                    'data': base58.b58decode(inner_instruction.data),
+                } for inner_instruction in inner_instructions[idx]]
+            )
+        return ordered_instructions
+    
+    def _get_reward(self, tx_result: GetTransactionResp) -> float:
+        if tx_result.value.transaction.meta.err:
+            return 0
+
+        ordered_instructions = self._get_ordered_instructions(tx_result)
+
+        reward = 0
+        for ix in ordered_instructions:
+            key = (ix['program_id'], ix['data'][0])
+            if key not in self.program_instructions_seen:
+                reward += 1
+                self.program_instructions_seen[key] = True
+            logging.info(f"Discovered new program instruction ({str(key[0])}, {str(key[1])})")
+        return reward
+
+    
     def render(self, mode="human"):
         logging.info("Rendering not implemented for this environment.")
         pass
@@ -280,12 +307,13 @@ if __name__ == '__main__':
             tx = VersionedTransaction(message, [env.agent_keypair])
 
             logging.info("\nExecuting a test transaction...")
-            obs, receipt, terminated, info = await env.step(tx)
+            obs, reward, terminated, truncated, info = await env.step(tx)
             
             logging.info("\n--- Step Result ---")
             logging.info(f"Observation: {obs}")
-            logging.info(f"Transaction Receipt: {receipt}")
+            logging.info(f"Reward: {reward}")
             logging.info(f"Terminated: {terminated}")
+            logging.info(f"Truncated: {truncated}")
             logging.info(f"Info: {info}")
 
         await env.close()
