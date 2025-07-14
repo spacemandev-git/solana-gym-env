@@ -12,8 +12,9 @@ import signal
 from solana.rpc.async_api import AsyncClient, GetTransactionResp
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
-from solders.system_program import transfer, TransferParams
+from solders.system_program import transfer, TransferParams, create_nonce_account
 from solders.message import MessageV0
+
 
 # TODO: These should be configured based on the specific protocols and tokens
 MAX_TOKENS = 10  # Maximum number of different tokens in the wallet
@@ -280,12 +281,34 @@ class SurfpoolEnv(gym.Env):
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
     
     async def main():
         env = SurfpoolEnv()
         obs, info = await env.reset()
         logging.info("Environment reset.")
         logging.info(f"Initial Observation: {obs}")
+
+        async def make_tx(ixs, signers=[]):
+            latest_blockhash = await env.client.get_latest_blockhash()
+            message = MessageV0.try_compile(
+                payer=env.agent_keypair.pubkey(),
+                instructions=ixs,
+                address_lookup_table_accounts=[],
+                recent_blockhash=latest_blockhash.value.blockhash
+            )
+            tx = VersionedTransaction(message, [env.agent_keypair] + signers)
+            return tx
+
+        def render_step(step_result):
+            obs, reward, terminated, truncated, info = step_result
+            logging.info("\n--- Step Result ---")
+            logging.info(f"Observation: {obs}")
+            logging.info(f"Reward: {reward}")
+            logging.info(f"Terminated: {terminated}")
+            logging.info(f"Truncated: {truncated}")
+            logging.info(f"Info: {info}")
+
 
         if obs is not None:
             recipient = Keypair().pubkey()
@@ -296,25 +319,29 @@ if __name__ == '__main__':
                     lamports=1000
                 )
             )
+            tx = await make_tx([instruction])
+            render_step(await env.step(tx))
             
-            latest_blockhash = await env.client.get_latest_blockhash()
-            message = MessageV0.try_compile(
-                payer=env.agent_keypair.pubkey(),
-                instructions=[instruction],
-                address_lookup_table_accounts=[],
-                recent_blockhash=latest_blockhash.value.blockhash
+            instruction = transfer(
+                TransferParams(
+                    from_pubkey=env.agent_keypair.pubkey(),
+                    to_pubkey=recipient,
+                    lamports=1001
+                )
             )
-            tx = VersionedTransaction(message, [env.agent_keypair])
+            tx = await make_tx([instruction])
+            render_step(await env.step(tx))
 
-            logging.info("\nExecuting a test transaction...")
-            obs, reward, terminated, truncated, info = await env.step(tx)
-            
-            logging.info("\n--- Step Result ---")
-            logging.info(f"Observation: {obs}")
-            logging.info(f"Reward: {reward}")
-            logging.info(f"Terminated: {terminated}")
-            logging.info(f"Truncated: {truncated}")
-            logging.info(f"Info: {info}")
+            nonce = Keypair()
+            instructions = create_nonce_account(
+                env.agent_keypair.pubkey(),
+                nonce.pubkey(),
+                env.agent_keypair.pubkey(),
+                1_447_680,
+            )
+            tx = await make_tx(instructions, [nonce])
+            render_step(await env.step(tx))
+
 
         await env.close()
 
