@@ -13,6 +13,9 @@ class TypeScriptSkillManager:
             os.makedirs(self.skills_dir)
         self._load_existing_skills()
 
+    def get_skills(self) -> Dict[str, str]:
+        return self.skills
+
     def _load_existing_skills(self):
         for filename in sorted(os.listdir(self.skills_dir)):
             if filename.endswith(".ts"):

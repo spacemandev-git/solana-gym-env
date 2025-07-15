@@ -8,6 +8,8 @@ from openai import AsyncOpenAI
 from skill_manager.ts_skill_manager import TypeScriptSkillManager
 from surfpool_env import SurfpoolEnv
 from known_programs import KNOWN_PROGRAM_IDS
+from solders.transaction import Transaction
+import base64
 
 SYSTEM_PROMPT = """
 You are a Solana expert, attempting to maximize your understanding of Solana program ecosystem.
@@ -162,67 +164,122 @@ class SimpleExplorer():
             api_key=self.api_key
         )
 
-    async def step(self, last_observation):
-        self.messages.append({
-            'role': 'user',
-            'content': f"Last observation: {last_observation}"
-        })
+    async def step(self):
+        # self.messages.append({
+        #     'role': 'user',
+        #     'content': f"Last observation: {last_observation}"
+        # })
+        # observation = await self.env._get_observation()
+        # message = f"Last observation: {observation}"
 
-        logging.info(f"Messages: {self.messages}")
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=self.messages,
-            stream=False,
-            tools=FUNCTIONS,
-            tool_choice="auto",
-        )
-        if response.choices[0].finish_reason == "tool_calls":
-            function_call = response.choices[0].message.tool_calls[0].function
-            function_name = function_call.name
-            function_args = json.loads(function_call.arguments)
-            logging.info(f"Function call: {function_name} with args: {function_args}")
-            pdb.set_trace()
-            if function_name == "executeSkill":
-                skill_name = function_args["skill_name"]
-                skill_code = self.skills.get_skill(skill_name)
-            elif function_name == "fetchTransactions":
-                program_id = function_args["program_id"]
-                transactions = await self.env.fetch_transactions(program_id)
-                logging.info(f"Transactions: {transactions}")
-            elif function_name == "writeSkill":
-                skill_name = function_args["skill_name"]
-                skill_code = function_args["skill_code"]
-            elif function_name == "readSkills":
-                skills = self.skills.get_skills()
-                logging.info(f"Skills: {skills}")
-            else:
-                raise ValueError(f"Unexpected function name: {function_name}")
-                # self.messages.append({
-                #     'role': 'function',
-                #     'name': function_name,
-                #     'content': skill_code
+        finish_reason = "tool_calls"
+        reward = 0.0
+        while finish_reason == "tool_calls":
+            # pdb.set_trace()
+            logging.info(f"Messages: {self.messages}")
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=self.messages,
+                stream=False,
+                tools=FUNCTIONS,
+                tool_choice="auto",
+            )
+            self.messages.append(response.choices[0].message.dict())
+            
+            done = False
+            finish_reason = response.choices[0].finish_reason
+            if finish_reason == "tool_calls":
+                for tool_meta in response.choices[0].message.tool_calls:
+                # tool_meta = response.choices[0].message.tool_calls[0]
+                    tool_call = tool_meta.function
+                    function_name = tool_call.name
+                    function_args = json.loads(tool_call.arguments)
+                    tool_message = {
+                        "role": "tool",
+                        "tool_call_id": tool_meta.id,
+                        "name": function_name,
+                        "content": ""
+                    }
+                    logging.info(f"Function call: {function_name} with args: {function_args}")
+                    if function_name == "executeSkill":
+                        skill_name = function_args["skill_name"]
+                        skill_file_path = self.skills.get_skills().get(skill_name, None)
+                        if skill_file_path is None:
+                            tool_message["content"] = f"Skill {skill_name} not found"
+                        else:
+                            try:
+                                # Pass agent pubkey and latest blockhash to skill execution
+                                agent_pubkey = str(self.env.agent_keypair.pubkey())
+                                
+                                # Fetch latest blockhash before skill execution
+                                blockhash_resp = await self.env.client.get_latest_blockhash()
+                                latest_blockhash_str = str(blockhash_resp.value.blockhash)
+                                
+                                result = self.skills.execute_skill(skill_file_path, agent_pubkey=agent_pubkey, latest_blockhash=latest_blockhash_str)
+                                
+                                # Get transaction data from skill result
+                                # Note: tx_receipt_json_string is now a base64-encoded unsigned transaction
+                                tx_data = result.get("serialized_tx")
+                                tx_bytes = base64.b64decode(tx_data)
+                                tx = Transaction.from_bytes(tx_bytes)
+                                
+                                # Sign with agent keypair
+                                # Fetch the latest blockhash from surfpool
+                                blockhash_resp = await self.solana_env.client.get_latest_blockhash()
+                                latest_blockhash = blockhash_resp.value.blockhash
+                                pdb.set_trace()
+                                
+                                tx.sign([self.solana_env.agent_keypair], latest_blockhash)
+                                
+                                # Send transaction through surfpool
+                                # Note: surfpool_env.step returns (obs, tx_receipt, done, info)
+                                step_reward, _, _, _, send_info = await self.env.step(tx)
+                                reward += step_reward
+                                
+                                tool_message["content"] = f"{json.dumps(send_info)}"
+                                            
+                            except Exception as e:
+                                logging.error(f"Error running skill {skill_id}: {e}")
+                                tool_message["content"] = f"Exception in skill {skill_id}: {e}"
+                                tx_data = None
 
-            # if function_name == "executeSkill":
-            #     skill_name = function_args["skill_name"]
-            #     skill_code = self.skills.get_skill(skill_name)
-        else:
-            raise ValueError(f"Unexpected finish reason: {response.choices[0].finish_reason}")
+                    elif function_name == "fetchTransactions":
+                        program_id = function_args["program_id"]
+                        txs = await self.env.fetch_transactions(program_id)
+                        # pdb.set_trace()
+                        tool_message["content"] = json.dumps(txs)
+                        logging.info(f"Transactions: {txs}")
+                    elif function_name == "writeSkill":
+                        skill_name = function_args["skill_name"]
+                        skill_code = function_args["skill_code"]
+                        skill_id = self.skills.register(skill_code)
+                        tool_message["content"] = f"Skill {skill_name} written to file system with id {skill_id}"
+                    elif function_name == "readSkills":
+                        skills = self.skills.get_skills()
+                        tool_message["content"] = json.dumps(skills)
+                        logging.info(f"Skills: {skills}")
+                    else:
+                        raise ValueError(f"Unexpected function name: {function_name}")
+                    self.messages.append(tool_message)
 
-        obs, reward, terminated, truncated, info = await self.env.step()
-
-        return self.messages, reward, terminated, truncated, info
+        return reward, done
 
     async def rollout(self):
         logging.info("Starting rollout")
         observation, info = await self.reset()
         logging.info(f"Observation: {observation}")
-        # while True:
-        messages, reward, terminated, truncated, info = await self.step(observation)
-        #     logging.info(f"Observation: {observation}")
-        #     if terminated or truncated:
-        #         break
-        # return messages, reward, terminated, truncated, info
-        return False
+        total_reward = 0.0
+        self.messages.append({
+            'role': 'user',
+            'content': f"Last observation: {observation}"
+        })
+        while True:
+            reward, done = await self.step()
+            total_reward += reward
+            logging.info(f"Total reward: {total_reward}")
+            if done:
+                break
+        return total_reward, False
 
     async def reset(self):
         observation, info = await self.env.reset()
@@ -239,7 +296,8 @@ if __name__ == "__main__":
     async def main():
         explorer = SimpleExplorer()
         logging.info("Starting rollout")
-        await explorer.rollout()
+        total_reward, done = await explorer.rollout()
+        logging.info(f"Total reward: {total_reward}")
     
     asyncio.run(main())
     # import json

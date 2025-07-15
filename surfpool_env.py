@@ -1,3 +1,4 @@
+import pdb
 import base58
 import gymnasium as gym
 import numpy as np
@@ -8,6 +9,8 @@ import json
 import shutil
 import os
 import signal
+from dotenv import load_dotenv
+from os.path import dirname, join
 
 from solana.rpc.async_api import AsyncClient, GetTransactionResp
 from solders.keypair import Keypair
@@ -17,6 +20,8 @@ from solders.message import MessageV0
 from solders.pubkey import Pubkey
 
 from known_programs import KNOWN_PROGRAM_IDS
+
+load_dotenv(join(dirname(__file__), '.env'))
 
 READY_TOKEN = b"Connection established."          # surfpool prints this when ready
 # ──────────────────────────────────────────────────────────────────────────
@@ -95,6 +100,7 @@ class SurfpoolEnv(gym.Env):
         self.agent_keypair = Keypair()
 
         self.tx_fetch_rpc_url = os.getenv("SOLANA_TX_FETCH_RPC_URL", "https://api.mainnet-beta.solana.com")
+        pdb.set_trace()
         self.tx_fetch_client = AsyncClient(self.tx_fetch_rpc_url)
 
         # --- Observation Space ---
@@ -317,7 +323,7 @@ class SurfpoolEnv(gym.Env):
                             instructions.append({
                                 "id": str(outer_idx),
                                 "program_id_index": ix.program_id_index,
-                                "accounts": ix.accounts,
+                                "accounts": [str(a) for a in ix.accounts],
                                 "data": ix.data,
                                 "depth": 0
                             })
@@ -330,7 +336,7 @@ class SurfpoolEnv(gym.Env):
                                     instructions.append({
                                         "id": f"{outer_idx}.{inner_idx}",
                                         "program_id_index": inner_ix.program_id_index,
-                                        "accounts": inner_ix.accounts,
+                                        "accounts": [str(a) for a in inner_ix.accounts],
                                         "data": inner_ix.data,
                                         "depth": 1
                                     })
@@ -342,10 +348,10 @@ class SurfpoolEnv(gym.Env):
                         examples.append({
                             "signature": str(sig_info.signature),
                             "success": tx.value.transaction.meta.err is None,
-                            "error": tx.value.transaction.meta.err,
+                            "error": str(tx.value.transaction.meta.err),
                             "logs": logs,  # ALL logs, no limit
                             "instructions": instructions,  # Sorted by execution order
-                            "accounts": tx.value.transaction.transaction.message.account_keys,
+                            "accounts": [str(a) for a in tx.value.transaction.transaction.message.account_keys],
                             "slot": tx.value.slot,
                         })
                 except Exception as e:
