@@ -14,8 +14,8 @@ from solders.transaction import Transaction
 import base64
 
 SYSTEM_PROMPT = """
-You are a Solana expert, attempting to maximize your understanding of Solana program ecosystem.
-Your goal is to succesfully interact with as many programs as possible using as many different instructions as possible.
+You are an expert Solana developer, attempting to show off how many different programs you can interact with.
+Your goal is to succesfully interact with as many programs as possible using with as many different instructions as possible.
 You will be given a list of programs that we recommend you interact with, but you are free to interact with any program you want.
 We recommend that you start by interacting with the programs in the list, and then move on to other programs.
 
@@ -35,7 +35,10 @@ You get more points for interacting with new programs and new instructions.
 
 === TYPESCRIPT SKILL TEMPLATE ===
 ```typescript
+// This is a template for a skill. You can use modify it as necessary to create a new skill.
+// The default export needs to be a function that returns a base64 encoded transaction.
 import {{ Transaction, SystemProgram, PublicKey, LAMPORTS_PER_SOL }} from '@solana/web3.js';
+import {{ AnchorProvider, AnchorWallet, Wallet }} from '@coral-xyz/anchor';
 
 export async function executeSkill(): Promise<string> {{
     const tx = new Transaction();
@@ -200,7 +203,7 @@ class SimpleExplorer():
         reward = 0.0
         while finish_reason == "tool_calls":
             # logging.info(f"Messages: {self.messages}")
-            self.write_trace(self.messages, reward)
+            self.write_trace(self.messages, self.reward + reward)
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=self.messages,
@@ -209,7 +212,7 @@ class SimpleExplorer():
                 tool_choice="auto",
             )
             self.messages.append(response.choices[0].message.model_dump())
-            self.write_trace(self.messages, reward)
+            self.write_trace(self.messages, self.reward + reward)
             
             done = False
             finish_reason = response.choices[0].finish_reason
@@ -283,31 +286,35 @@ class SimpleExplorer():
                         raise ValueError(f"Unexpected function name: {function_name}")
                     self.messages.append(tool_message)
 
-        self.write_trace(self.messages, reward)
+        self.write_trace(self.messages, self.reward + reward)
         return reward, done
 
     async def rollout(self):
         logging.info("Starting rollout")
         observation, info = await self.reset()
         logging.info(f"Observation: {observation}")
-        total_reward = 0.0
         self.messages.append({
             'role': 'user',
             'content': f"Last observation: {observation}"
         })
         while True:
             reward, done = await self.step()
-            total_reward += reward
-            logging.info(f"Total reward: {total_reward}")
+            self.reward += reward
+            logging.info(f"Total reward: {self.reward}")
             if done:
                 break
-        return total_reward, False
+        return self.reward, False
 
     async def reset(self):
         observation, info = await self.env.reset()
+        self.reward = 0.0
         self.messages = [{
             'role': 'system',
-            'content': SYSTEM_PROMPT.format(agent_pubkey=self.env.agent_keypair.pubkey(), protocol_list=json.dumps(list(KNOWN_PROGRAM_IDS.keys()), indent=2)),
+            'content': SYSTEM_PROMPT.format(
+                agent_pubkey=self.env.agent_keypair.pubkey(), 
+                # protocol_list=json.dumps(list(KNOWN_PROGRAM_IDS.keys()), indent=2)
+                protocol_list="11111111111111111111111111111111, ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL, TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+            ),
         }]
         return observation, info
 

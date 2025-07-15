@@ -2,7 +2,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 
-const execAsync = promisify(exec);
+// const execAsync = promisify(exec);
 
 // Define the expected return type from executeSkill in TS skills
 type SkillExecutionResult = string;
@@ -71,27 +71,6 @@ async function runSkill(): Promise<void> {
     const timeoutMs = parseInt(timeoutMsStr, 10);
     const absolutePath = path.resolve(filePath);
 
-    // Create the environment object that skills expect
-    // const skillEnv = {
-    //     ...surfpoolEnv,
-    //     agentPubkey: agentPubkey || "11111111111111111111111111111111",
-    //     latestBlockhash: latestBlockhash || "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
-    // };
-
-    // // Update the mock environment with real agent pubkey if provided
-    // if (agentPubkey) {
-    //     surfpoolEnv.getWallet = () => ({
-    //         balances: [2.5, 100.0, 0.0, 0.0, 0.0],
-    //         publicKey: agentPubkey
-    //     });
-    // }
-
-    // // Update the blockhash if provided
-    // if (latestBlockhash) {
-    //     surfpoolEnv.getRecentBlockhash = () => latestBlockhash;
-    // }
-
-    // Reset transaction counter for each skill execution
     transactionCount = 0;
 
     try {
@@ -116,6 +95,8 @@ async function runSkill(): Promise<void> {
         // For skill execution errors, return a proper error format
         console.log(JSON.stringify({
             serialized_tx: null,
+            error: reason,
+            trace: error instanceof Error && error.stack ? error.stack : (error?.toString?.() ?? String(error))
         }));
         process.exit(1);
     }

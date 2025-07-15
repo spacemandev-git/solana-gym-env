@@ -60,11 +60,11 @@ class TypeScriptSkillManager:
                 check=True,
                 encoding='utf-8'
             )
-            pdb.set_trace()
+            # pdb.set_trace()
             # runSkill.ts now outputs a JSON object with tx_receipt_json_string
             return json.loads(result.stdout.strip("\n"))
         except subprocess.CalledProcessError as e:
-            pdb.set_trace()
+            # pdb.set_trace()
             # If runSkill.ts exits with an error, it prints the JSON result to stderr
             try:
                 # The error output might also be a JSON object if the skill itself failed gracefully
