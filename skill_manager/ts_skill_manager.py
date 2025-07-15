@@ -23,14 +23,14 @@ class TypeScriptSkillManager:
                 self.skills[skill_id] = os.path.join(self.skills_dir, filename)
                 self.next_skill_id += 1
     
-    def register(self, code: str) -> int:
+    def register(self, skill_name: str, code: str) -> int:
         skill_id = self.next_skill_id
         file_path = os.path.join(self.skills_dir, f"skill_{skill_id}.ts")
         with open(file_path, "w") as f:
             f.write(code)
-        self.skills[skill_id] = file_path
+        self.skills[skill_name] = file_path
         self.next_skill_id += 1
-        return skill_id
+        return skill_name
 
     def __len__(self):
         return len(self.skills)

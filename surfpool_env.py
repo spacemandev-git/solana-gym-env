@@ -100,27 +100,8 @@ class SurfpoolEnv(gym.Env):
         self.agent_keypair = Keypair()
 
         self.tx_fetch_rpc_url = os.getenv("SOLANA_TX_FETCH_RPC_URL", "https://api.mainnet-beta.solana.com")
-        pdb.set_trace()
         self.tx_fetch_client = AsyncClient(self.tx_fetch_rpc_url)
 
-        # --- Observation Space ---
-        # self.observation_space = spaces.Dict({
-        #     "wallet_balances": spaces.Box(low=0, high=np.inf, shape=(MAX_TOKENS,), dtype=np.float64),
-        #     "agent_pubkey": spaces.Box(low=0, high=255, shape=(32,), dtype=np.uint8),
-        #     "block_height": spaces.Box(low=0, high=np.inf, shape=(1,), dtype=np.int64),
-        #     "block_timestamp": spaces.Box(low=0, high=np.inf, shape=(1,), dtype=np.int64),
-        #     "last_tx_success": spaces.Discrete(2),
-        #     "last_tx_error": spaces.Text(max_length=128),
-        #     "available_protocols": spaces.Sequence(
-        #         spaces.Dict({
-        #             "protocol_id": spaces.Discrete(NUM_PROTOCOLS),
-        #             "address": spaces.Box(low=0, high=255, shape=(32,), dtype=np.uint8),
-        #         })
-        #     )
-        # })
-        
-        # This action space is a placeholder. The Voyager layer will use its own.
-        # self.action_space = spaces.Discrete(1)
         self.program_instructions_seen = {}
         self.last_observation = None
         self.last_tx_receipt = None
@@ -234,7 +215,7 @@ class SurfpoolEnv(gym.Env):
         self.last_tx_receipt = tx_receipt
         obs = await self._get_observation(last_tx_result=tx_receipt)
         
-        return obs, self._get_reward(result), False, False, { "tx_sig": sig.value, "tx_meta": result.value }
+        return obs, self._get_reward(result), False, False, { "tx_sig": str(sig.value), "tx_meta": result.value.to_json() }
 
     def _get_ordered_instructions(self, tx_result: GetTransactionResp) -> list[dict[str, bytes]]:
         inner_instructions = {ix.index: ix.instructions for ix in tx_result.value.transaction.meta.inner_instructions}
@@ -265,7 +246,7 @@ class SurfpoolEnv(gym.Env):
             if key not in self.program_instructions_seen:
                 reward += 1
                 self.program_instructions_seen[key] = True
-            logging.info(f"Discovered new program instruction ({str(key[0])}, {str(key[1])})")
+                logging.info(f"Discovered new program instruction ({str(key[0])}, {str(key[1])})")
         return reward
 
     
@@ -366,32 +347,6 @@ class SurfpoolEnv(gym.Env):
                 "count": len(examples),
                 "status": "success"
             }
-            
-            # Store in environment for next skill generation
-            self.last_fetched_examples = examples
-            self.last_fetched_program = program_id
-            
-            logging.info(f"Successfully fetched {len(examples)} examples")
-            if examples:
-                # Log summary of what was found
-                successful_txs = sum(1 for ex in examples if ex['success'])
-                failed_txs = len(examples) - successful_txs
-                logging.info(f"Transaction breakdown: {successful_txs} successful, {failed_txs} failed")
-                
-                # Log unique instruction patterns found
-                unique_instructions = set()
-                for ex in examples:
-                    for ix in ex['instructions']:
-                        unique_instructions.add(f"depth={ix['depth']}")
-                logging.info(f"Instruction patterns found: {unique_instructions}")
-                
-                # Log first example's error (if any) for learning
-                for ex in examples:
-                    if ex.get('error'):
-                        logging.info(f"Example error to learn from: {ex['error']}")
-                        break
-            
-            logging.info("Examples stored for next skill generation")
             
             return info  # No reward for fetching
             

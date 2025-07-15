@@ -39,12 +39,6 @@ class SolanaVoyagerEnv(gym.Env):
         self.skills = TypeScriptSkillManager(skill_root=skill_root)
         self.planner = EnhancedLLMPlanner(self.skills, agent_pubkey=str(self.solana_env.agent_keypair.pubkey()), protocols=protocols)
 
-        # RL view of the world - Dict action space
-        # self.action_space = gym.spaces.Dict({
-        #     "action_type": gym.spaces.Discrete(len(self.skills) + len(self.SPECIALS)),
-        #     "program_id": gym.spaces.Text(max_length=44)  # Base58 program address
-        # })
-        
         self.max_steps = max_steps
         self.t = 0
         

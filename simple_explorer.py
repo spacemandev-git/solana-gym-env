@@ -1,8 +1,10 @@
 
+from datetime import datetime
 import json
 import logging
 import os
 import pdb
+import uuid
 
 from openai import AsyncOpenAI
 from skill_manager.ts_skill_manager import TypeScriptSkillManager
@@ -57,11 +59,33 @@ export async function executeSkill(): Promise<string> {{
 }}
 ```
 
+The package json for the skill runner is:
+```json
+{{
+  "name": "skill_runner",
+  "module": "runSkill.ts",
+  "type": "module",
+  "devDependencies": {{
+    "bun-types": "latest"
+  }},
+  "peerDependencies": {{
+    "typescript": "^5.0.0"
+  }},
+  "dependencies": {{
+    "@solana/web3.js": "^1.98.2",
+    "@coral-xyz/anchor": "^0.30.1"
+  }}
+}}
+```
+
 === IMPORTANT NOTES ===
 1. Each skill must create exactly ONE unsigned transaction
 2. The transaction will be signed and sent by the environment
 3. Start simple - a transfer to a protocol address counts as interaction
 4. Return the base64 encoded serialized transaction
+
+=== PROTOCOL LIST ===
+{protocol_list}
 """
 
 FUNCTIONS = [
@@ -148,13 +172,14 @@ class SimpleExplorer():
     def __init__(self):
         self.env = SurfpoolEnv(rpc_url="https://api.mainnet-beta.solana.com")
         self.messages = []
-        self.skills = TypeScriptSkillManager(skill_root="./skills")
+        self.run_id = datetime.now().strftime("%y-%m-%d") + "_" + str(int(datetime.now().timestamp()))
+        self.skills = TypeScriptSkillManager(skill_root=f"./skills/{self.run_id}")
         # self.model = 'tencent/hunyuan-a13b-instruct:free'
-        # self.model = "x-ai/grok-3-mini"
+        self.model = "x-ai/grok-3-mini"
         # self.model = "mistralai/mistral-small-3.2-24b-instruct:free"
         # self.model = "google/gemini-2.5-pro-exp-03-25"
         # self.model = "deepseek/deepseek-chat-v3-0324:free"
-        self.model = "openai/gpt-4o-mini"
+        # self.model = "openai/gpt-4o-mini"
         # self.model = "mistralai/devstral-small"
         # self.model = "moonshotai/kimi-k2:free"
         # "google/gemma-3n-e2b-it:free"
@@ -164,19 +189,18 @@ class SimpleExplorer():
             api_key=self.api_key
         )
 
-    async def step(self):
-        # self.messages.append({
-        #     'role': 'user',
-        #     'content': f"Last observation: {last_observation}"
-        # })
-        # observation = await self.env._get_observation()
-        # message = f"Last observation: {observation}"
+    def write_trace(self, messages, reward):
+        with open(f"traces/{self.run_id}.json", "w") as f:
+            json.dump(messages, f, indent=2)
+        with open(f"traces/{self.run_id}_reward.csv", "a") as f:
+            f.write(f"{len(self.messages)},{reward}\n")
 
+    async def step(self):
         finish_reason = "tool_calls"
         reward = 0.0
         while finish_reason == "tool_calls":
-            # pdb.set_trace()
-            logging.info(f"Messages: {self.messages}")
+            # logging.info(f"Messages: {self.messages}")
+            self.write_trace(self.messages, reward)
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=self.messages,
@@ -184,13 +208,13 @@ class SimpleExplorer():
                 tools=FUNCTIONS,
                 tool_choice="auto",
             )
-            self.messages.append(response.choices[0].message.dict())
+            self.messages.append(response.choices[0].message.model_dump())
+            self.write_trace(self.messages, reward)
             
             done = False
             finish_reason = response.choices[0].finish_reason
             if finish_reason == "tool_calls":
                 for tool_meta in response.choices[0].message.tool_calls:
-                # tool_meta = response.choices[0].message.tool_calls[0]
                     tool_call = tool_meta.function
                     function_name = tool_call.name
                     function_args = json.loads(tool_call.arguments)
@@ -216,52 +240,50 @@ class SimpleExplorer():
                                 latest_blockhash_str = str(blockhash_resp.value.blockhash)
                                 
                                 result = self.skills.execute_skill(skill_file_path, agent_pubkey=agent_pubkey, latest_blockhash=latest_blockhash_str)
-                                
-                                # Get transaction data from skill result
-                                # Note: tx_receipt_json_string is now a base64-encoded unsigned transaction
                                 tx_data = result.get("serialized_tx")
-                                tx_bytes = base64.b64decode(tx_data)
-                                tx = Transaction.from_bytes(tx_bytes)
-                                
-                                # Sign with agent keypair
-                                # Fetch the latest blockhash from surfpool
-                                blockhash_resp = await self.solana_env.client.get_latest_blockhash()
-                                latest_blockhash = blockhash_resp.value.blockhash
-                                pdb.set_trace()
-                                
-                                tx.sign([self.solana_env.agent_keypair], latest_blockhash)
-                                
-                                # Send transaction through surfpool
-                                # Note: surfpool_env.step returns (obs, tx_receipt, done, info)
-                                step_reward, _, _, _, send_info = await self.env.step(tx)
-                                reward += step_reward
-                                
-                                tool_message["content"] = f"{json.dumps(send_info)}"
+                                if not tx_data:
+                                    tool_message["content"] = f"Error executing skill {skill_name}: {json.dumps(result)}"
+                                else:
+                                    # Get transaction data from skill result
+                                    tx_bytes = base64.b64decode(tx_data)
+                                    tx = Transaction.from_bytes(tx_bytes)
+                                    
+                                    # Sign with agent keypair
+                                    # Fetch the latest blockhash from surfpool
+                                    blockhash_resp = await self.env.client.get_latest_blockhash()
+                                    latest_blockhash = blockhash_resp.value.blockhash
+                                    
+                                    tx.sign([self.env.agent_keypair], latest_blockhash)
+                                    
+                                    # Send transaction through surfpool
+                                    obs, step_reward, _, _, info = await self.env.step(tx)
+                                    reward += step_reward
+                                    
+                                    logging.info(f"Reward: {step_reward}, total reward: {reward}")
+                                    tool_message["content"] = f"{json.dumps({ 'observation': obs, 'info': info, 'reward': step_reward })}"
                                             
                             except Exception as e:
                                 logging.error(f"Error running skill {skill_id}: {e}")
                                 tool_message["content"] = f"Exception in skill {skill_id}: {e}"
-                                tx_data = None
 
                     elif function_name == "fetchTransactions":
                         program_id = function_args["program_id"]
                         txs = await self.env.fetch_transactions(program_id)
-                        # pdb.set_trace()
                         tool_message["content"] = json.dumps(txs)
-                        logging.info(f"Transactions: {txs}")
                     elif function_name == "writeSkill":
                         skill_name = function_args["skill_name"]
                         skill_code = function_args["skill_code"]
-                        skill_id = self.skills.register(skill_code)
+                        skill_id = self.skills.register(skill_name, skill_code)
                         tool_message["content"] = f"Skill {skill_name} written to file system with id {skill_id}"
                     elif function_name == "readSkills":
-                        skills = self.skills.get_skills()
+                        skills = list(self.skills.get_skills().keys())
                         tool_message["content"] = json.dumps(skills)
                         logging.info(f"Skills: {skills}")
                     else:
                         raise ValueError(f"Unexpected function name: {function_name}")
                     self.messages.append(tool_message)
 
+        self.write_trace(self.messages, reward)
         return reward, done
 
     async def rollout(self):
@@ -285,7 +307,7 @@ class SimpleExplorer():
         observation, info = await self.env.reset()
         self.messages = [{
             'role': 'system',
-            'content': SYSTEM_PROMPT.format(agent_pubkey=self.env.agent_keypair.pubkey()),
+            'content': SYSTEM_PROMPT.format(agent_pubkey=self.env.agent_keypair.pubkey(), protocol_list=json.dumps(list(KNOWN_PROGRAM_IDS.keys()), indent=2)),
         }]
         return observation, info
 
