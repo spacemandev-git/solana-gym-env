@@ -20,32 +20,6 @@ from solders.transaction import Transaction
 # --- Constants ---
 CONFIG_MAX_LLM_SKILL_TRIES = 3
 
-import csv
-
-KNOWN_PROGRAM_IDS: Dict[str, str] = {}
-
-def load_program_ids_from_csv(file_path: str):
-    global KNOWN_PROGRAM_IDS
-    KNOWN_PROGRAM_IDS = {}
-    if not os.path.exists(file_path) or os.stat(file_path).st_size == 0:
-        raise FileNotFoundError(f"Program IDs CSV file not found or is empty: {file_path}")
-    with open(file_path, mode='r', newline='') as csvfile:
-        reader = csv.DictReader(csvfile)
-        for row in reader:
-            if 'program_address' in row and 'project_name' in row:
-                KNOWN_PROGRAM_IDS[row['program_address']] = row['project_name']
-
-# Load program IDs at startup
-try:
-    load_program_ids_from_csv('data/program_ids.csv')
-except FileNotFoundError as e:
-    logging.error(f"Failed to load program IDs: {e}")
-    # Depending on criticality, you might want to exit or use a fallback
-    # For now, we'll let it proceed with an empty dict if the file is missing/empty
-except Exception as e:
-    logging.error(f"An unexpected error occurred while loading program IDs: {e}")
-
-
 class SolanaVoyagerEnv(gym.Env):
     """
     High-level Gymnasium wrapper for a Solana agent, inspired by the Voyager paper.
@@ -66,10 +40,10 @@ class SolanaVoyagerEnv(gym.Env):
         self.planner = EnhancedLLMPlanner(self.skills, agent_pubkey=str(self.solana_env.agent_keypair.pubkey()), protocols=protocols)
 
         # RL view of the world - Dict action space
-        self.action_space = gym.spaces.Dict({
-            "action_type": gym.spaces.Discrete(len(self.skills) + len(self.SPECIALS)),
-            "program_id": gym.spaces.Text(max_length=44)  # Base58 program address
-        })
+        # self.action_space = gym.spaces.Dict({
+        #     "action_type": gym.spaces.Discrete(len(self.skills) + len(self.SPECIALS)),
+        #     "program_id": gym.spaces.Text(max_length=44)  # Base58 program address
+        # })
         
         self.max_steps = max_steps
         self.t = 0
@@ -91,130 +65,6 @@ class SolanaVoyagerEnv(gym.Env):
             "action_type": gym.spaces.Discrete(len(self.skills) + len(self.SPECIALS)),
             "program_id": gym.spaces.Text(max_length=44)  # Base58 program address
         })
-
-    def _protocol_labeler(self, tx_receipt: Dict[str, Any]) -> list[str]:
-        """
-        Identifies ALL protocols from a transaction receipt by checking for known
-        program IDs in the transaction's instructions. This check is performed
-        regardless of whether the transaction succeeded or failed.
-        Returns a list of protocol names found in the transaction.
-        """
-        if not tx_receipt:
-            return []
-
-        protocols_found = []
-        seen_protocols = set()  # To avoid duplicates
-
-        try:
-            # The transaction object contains account keys as strings
-            account_keys = tx_receipt.get("transaction", {}).get("message", {}).get("accountKeys", [])
-            if not account_keys:
-                return []
-
-            # The instructions contain indices into the account_keys list
-            instructions = tx_receipt.get("transaction", {}).get("message", {}).get("instructions", [])
-
-            for instruction in instructions:
-                program_id_index = instruction.get("programIdIndex")
-                if program_id_index is not None and program_id_index < len(account_keys):
-                    program_id_str = account_keys[program_id_index]
-                    if program_id_str in KNOWN_PROGRAM_IDS:
-                        protocol = KNOWN_PROGRAM_IDS[program_id_str]
-                        if protocol not in seen_protocols:
-                            seen_protocols.add(protocol)
-                            protocols_found.append(protocol)
-            
-            # Also check all account keys in case some are program IDs not in instructions
-            for key in account_keys:
-                if key in KNOWN_PROGRAM_IDS:
-                    protocol = KNOWN_PROGRAM_IDS[key]
-                    if protocol not in seen_protocols:
-                        seen_protocols.add(protocol)
-                        protocols_found.append(protocol)
-        except Exception as e:
-            logging.error(f"Error during protocol labeling: {e}")
-
-        return protocols_found
-
-    def _extract_instruction_discriminators(self, tx_receipt: Dict[str, Any]) -> Dict[str, Set[str]]:
-        """
-        Extracts unique instruction discriminators (first 8 bytes) for each program
-        from a transaction receipt. Returns a dict mapping program_id to set of discriminators.
-        """
-        if not tx_receipt:
-            return {}
-        
-        program_discriminators = {}
-        
-        try:
-            # Get account keys
-            account_keys = tx_receipt.get("transaction", {}).get("message", {}).get("accountKeys", [])
-            if not account_keys:
-                return {}
-            
-            # Process all instructions
-            instructions = tx_receipt.get("transaction", {}).get("message", {}).get("instructions", [])
-            
-            for instruction in instructions:
-                program_id_index = instruction.get("programIdIndex")
-                if program_id_index is not None and program_id_index < len(account_keys):
-                    program_id = account_keys[program_id_index]
-                    
-                    # Get instruction data (base64 encoded when encoding="json")
-                    data_str = instruction.get("data", "")
-                    if data_str and len(data_str) > 0:
-                        try:
-                            # Try base64 first (for JSON encoding)
-                            try:
-                                import base64
-                                data_bytes = base64.b64decode(data_str)
-                            except:
-                                # Fall back to base58 (for base58 encoding)
-                                data_bytes = base58.b58decode(data_str)
-                            
-                            if len(data_bytes) > 0:
-                                # Use first byte as discriminator (could extend to 8 bytes for Anchor)
-                                discriminator = data_bytes[0:1].hex()
-                                
-                                if program_id not in program_discriminators:
-                                    program_discriminators[program_id] = set()
-                                program_discriminators[program_id].add(discriminator)
-                        except Exception as e:
-                            logging.debug(f"Failed to decode instruction data: {e}")
-            
-            # Also process inner instructions if available
-            inner_instructions = tx_receipt.get("meta", {}).get("innerInstructions", [])
-            for inner_group in inner_instructions:
-                if isinstance(inner_group, dict) and "instructions" in inner_group:
-                    for inner_ix in inner_group["instructions"]:
-                        program_id_index = inner_ix.get("programIdIndex")
-                        if program_id_index is not None and program_id_index < len(account_keys):
-                            program_id = account_keys[program_id_index]
-                            
-                            data_str = inner_ix.get("data", "")
-                            if data_str and len(data_str) > 0:
-                                try:
-                                    # Try base64 first (for JSON encoding)
-                                    try:
-                                        import base64
-                                        data_bytes = base64.b64decode(data_str)
-                                    except:
-                                        # Fall back to base58 (for base58 encoding)
-                                        data_bytes = base58.b58decode(data_str)
-                                    
-                                    if len(data_bytes) > 0:
-                                        discriminator = data_bytes[0:1].hex()
-                                        
-                                        if program_id not in program_discriminators:
-                                            program_discriminators[program_id] = set()
-                                        program_discriminators[program_id].add(discriminator)
-                                except Exception as e:
-                                    logging.debug(f"Failed to decode inner instruction data: {e}")
-                    
-        except Exception as e:
-            logging.error(f"Error extracting instruction discriminators: {e}")
-        
-        return program_discriminators
 
     async def _grow_skill(self):
         """
@@ -404,7 +254,6 @@ class SolanaVoyagerEnv(gym.Env):
             return 0.0, {"error": f"Skill {skill_id} not found."}
 
         file_path = self.skills.skills[skill_id]
-        base_reward = 0.0
         info = {}
 
         try:
@@ -416,7 +265,6 @@ class SolanaVoyagerEnv(gym.Env):
             latest_blockhash_str = str(blockhash_resp.value.blockhash)
             
             result = self.skills.execute_skill(file_path, agent_pubkey=agent_pubkey, latest_blockhash=latest_blockhash_str)
-            base_reward = 0.0 # No base reward for failed skill execution
             
             # Get transaction data from skill result
             # Note: tx_receipt_json_string is now a base64-encoded unsigned transaction
@@ -424,7 +272,6 @@ class SolanaVoyagerEnv(gym.Env):
         except Exception as e:
             logging.error(f"Error running skill {skill_id}: {e}")
             info["error"] = f"Exception in skill {skill_id}: {e}"
-            base_reward = 0.0 # Ensure reward is 0 on failure
             tx_data = None
         
         # Process the base64 transaction if present
@@ -469,48 +316,7 @@ class SolanaVoyagerEnv(gym.Env):
         
         # The final reward includes a voyager-style exploration bonus.
         # This requires the transaction receipt from the skill execution.
-        final_reward = base_reward
-        if receipt_str:
-            receipt = json.loads(receipt_str)
-            protocols = self._protocol_labeler(receipt)
-            if protocols:
-                info["protocols_interacted"] = protocols
-                # Add bonus for each new protocol
-                for proto in protocols:
-                    if proto not in self.protocols_seen:
-                        logging.info(f"New protocol interaction: {proto}! Adding exploration bonus.")
-                        self.protocols_seen.add(proto)
-                        final_reward += 1.0
-                    else:
-                        logging.info(f"Already interacted with {proto}. No bonus.")
-            
-            # Extract and reward new instruction discriminators
-            program_instructions = self._extract_instruction_discriminators(receipt)
-            if program_instructions:
-                info["program_instructions"] = {}
-                for program_id, discriminators in program_instructions.items():
-                    # Initialize tracking for this program if needed
-                    if program_id not in self.program_instructions_seen:
-                        self.program_instructions_seen[program_id] = set()
-                    
-                    # Check for new instructions
-                    new_instructions = discriminators - self.program_instructions_seen[program_id]
-                    if new_instructions:
-                        program_name = KNOWN_PROGRAM_IDS.get(program_id, program_id[:8] + "...")
-                        logging.info(f"New instructions discovered for {program_name}: {new_instructions}")
-                        
-                        # Add instruction-level rewards
-                        for new_instr in new_instructions:
-                            self.program_instructions_seen[program_id].add(new_instr)
-                            final_reward += 0.5  # 0.5 reward per new instruction
-                            logging.info(f"  +0.5 reward for new instruction: {new_instr}")
-                        
-                        info["program_instructions"][program_id] = {
-                            "new": list(new_instructions),
-                            "total_seen": len(self.program_instructions_seen[program_id])
-                        }
-        
-        return final_reward, info
+        return 0.0, info
 
     async def reset(self, *, seed=None, options=None):
         self.t = 0

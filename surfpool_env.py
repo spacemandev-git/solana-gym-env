@@ -14,12 +14,9 @@ from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 from solders.system_program import transfer, TransferParams, create_nonce_account
 from solders.message import MessageV0
+from solders.pubkey import Pubkey
 
-
-# TODO: These should be configured based on the specific protocols and tokens
-MAX_TOKENS = 10  # Maximum number of different tokens in the wallet
-NUM_PROTOCOLS = 20 # Number of known protocols the agent can interact with
-MAX_INSTRUCTIONS_PER_PROTOCOL = 5 # Max instructions per protocol
+from known_programs import KNOWN_PROGRAM_IDS
 
 READY_TOKEN = b"Connection established."          # surfpool prints this when ready
 # ──────────────────────────────────────────────────────────────────────────
@@ -87,7 +84,7 @@ class SurfpoolEnv(gym.Env):
     """
     metadata = {"render_modes": ["human"], "render_fps": 30}
 
-    def __init__(self, rpc_url: str = "https://api.mainnet-beta.solana.com/6da7c9d2-7d3d-4f7f-8302-97f5fadb58a8", ws_url: str = "ws://localhost:8900"):
+    def __init__(self, rpc_url: str = "https://api.mainnet-beta.solana.com", ws_url: str = "ws://localhost:8900"):
         super().__init__()
 
         self.rpc_url = rpc_url
@@ -96,6 +93,9 @@ class SurfpoolEnv(gym.Env):
         self.client = AsyncClient("http://127.0.0.1:8899", "confirmed")
         self.test_validator_process = None
         self.agent_keypair = Keypair()
+
+        self.tx_fetch_rpc_url = os.getenv("SOLANA_TX_FETCH_RPC_URL", "https://api.mainnet-beta.solana.com")
+        self.tx_fetch_client = AsyncClient(self.tx_fetch_rpc_url)
 
         # --- Observation Space ---
         # self.observation_space = spaces.Dict({
@@ -125,23 +125,20 @@ class SurfpoolEnv(gym.Env):
     async def _get_observation(self, last_tx_result=None):
         # In a real implementation, you would fetch this data from the chain
         obs = {
-            "wallet_balances": np.zeros(MAX_TOKENS, dtype=np.float64),
+            "sol_balance": 0,
             "agent_pubkey": str(self.agent_keypair.pubkey()),
-            "block_height": np.array([0], dtype=np.int64),
-            "block_timestamp": np.array([0], dtype=np.int64),
-            "last_tx_success": 0,
-            "last_tx_error": "",
-            "available_protocols": [] # This would be populated with known protocol addresses
+            "block_height": 0,
+            # "available_protocols": [] # This would be populated with known protocol addresses
         }
 
         try:
             # Get basic block info
             block_height = await self.client.get_block_height()
-            obs["block_height"] = np.array([block_height.value], dtype=np.int64)
+            obs["block_height"] = block_height.value
             
             # Get agent SOL balance (as the first token)
             balance = await self.client.get_balance(self.agent_keypair.pubkey())
-            obs["wallet_balances"][0] = balance.value / 1e9 # Convert lamports to SOL
+            obs["sol_balance"] = balance.value / 1e9 # Convert lamports to SOL
 
             # TODO: Get other token balances
 
@@ -172,6 +169,7 @@ class SurfpoolEnv(gym.Env):
 
         # Create a new agent for the episode
         self.agent_keypair = Keypair()
+        self.program_instructions_seen = {}
         
         # Fund the agent
         try:
@@ -279,9 +277,130 @@ class SurfpoolEnv(gym.Env):
             logging.info("SurfpoolEnv closed.")
         logging.info("SurfpoolEnv closed.")
 
+    async def fetch_transactions(self, program_id: str = None):
+        """Fetches example transactions for a specific program."""
+        logging.info(f"=== FETCH_TX_EXAMPLES called for program: {program_id} ===")
+        
+        try:
+            # Fetch recent transactions from the tx fetch RPC (e.g., mainnet)
+            # This allows us to get real transaction examples even in local surfpool
+            logging.info(f"Fetching signatures from: {self.tx_fetch_rpc_url}")
+            signatures = await self.tx_fetch_client.get_signatures_for_address(
+                Pubkey.from_string(program_id),
+                limit=10  # Limit to avoid too many requests
+            )
+            
+            logging.info(f"Found {len(signatures.value)} signatures")
+            
+            examples = []
+            # Only process first 3 transactions to avoid timeouts
+            for i, sig_info in enumerate(signatures.value[:3]):
+                try:
+                    logging.info(f"Fetching transaction {i+1}/3: {sig_info.signature}")
+                    tx = await self.tx_fetch_client.get_transaction(
+                        sig_info.signature,
+                        encoding="json",
+                        max_supported_transaction_version=0
+                    )
+                    
+                    if tx and tx.value:
+                        logging.info(f"Successfully fetched transaction {i+1}")
+                        # Extract ALL logs - no truncation
+                        logs = tx.value.transaction.meta.log_messages or []
+                        
+                        # Parse ALL instructions (outer + inner) with proper indexing
+                        instructions = []
+                        
+                        # Parse outer instructions
+                        outer_ixs = tx.value.transaction.transaction.message.instructions or []
+                        for outer_idx, ix in enumerate(outer_ixs):
+                            instructions.append({
+                                "id": str(outer_idx),
+                                "program_id_index": ix.program_id_index,
+                                "accounts": ix.accounts,
+                                "data": ix.data,
+                                "depth": 0
+                            })
+                    
+                        # Parse inner instructions
+                        inner_ixs = tx.value.transaction.meta.inner_instructions or []
+                        for outer_idx, inner_group in enumerate(inner_ixs):
+                            if inner_group and inner_group.instructions:
+                                for inner_idx, inner_ix in enumerate(inner_group.instructions):
+                                    instructions.append({
+                                        "id": f"{outer_idx}.{inner_idx}",
+                                        "program_id_index": inner_ix.program_id_index,
+                                        "accounts": inner_ix.accounts,
+                                        "data": inner_ix.data,
+                                        "depth": 1
+                                    })
+                    
+                        # Sort instructions by execution order
+                        # This ensures "0", "0.0", "0.1", "1", "1.0", "2" ordering
+                        instructions.sort(key=lambda x: [int(part) for part in x["id"].split(".")])
+                        
+                        examples.append({
+                            "signature": str(sig_info.signature),
+                            "success": tx.value.transaction.meta.err is None,
+                            "error": tx.value.transaction.meta.err,
+                            "logs": logs,  # ALL logs, no limit
+                            "instructions": instructions,  # Sorted by execution order
+                            "accounts": tx.value.transaction.transaction.message.account_keys,
+                            "slot": tx.value.slot,
+                        })
+                except Exception as e:
+                    logging.warning(f"Failed to fetch transaction {i+1}: {e}")
+                    # Continue with next transaction
+                    continue
+            
+            info = {
+                "program_id": program_id,
+                "program_name": KNOWN_PROGRAM_IDS.get(program_id, "Unknown"),
+                "examples": examples,
+                "count": len(examples),
+                "status": "success"
+            }
+            
+            # Store in environment for next skill generation
+            self.last_fetched_examples = examples
+            self.last_fetched_program = program_id
+            
+            logging.info(f"Successfully fetched {len(examples)} examples")
+            if examples:
+                # Log summary of what was found
+                successful_txs = sum(1 for ex in examples if ex['success'])
+                failed_txs = len(examples) - successful_txs
+                logging.info(f"Transaction breakdown: {successful_txs} successful, {failed_txs} failed")
+                
+                # Log unique instruction patterns found
+                unique_instructions = set()
+                for ex in examples:
+                    for ix in ex['instructions']:
+                        unique_instructions.add(f"depth={ix['depth']}")
+                logging.info(f"Instruction patterns found: {unique_instructions}")
+                
+                # Log first example's error (if any) for learning
+                for ex in examples:
+                    if ex.get('error'):
+                        logging.info(f"Example error to learn from: {ex['error']}")
+                        break
+            
+            logging.info("Examples stored for next skill generation")
+            
+            return info  # No reward for fetching
+            
+        except Exception as e:
+            logging.error(f"Error fetching transactions: {e}")
+            logging.error(f"Exception type: {type(e)}")
+            logging.error(f"Exception details: {repr(e)}")
+            import traceback
+            logging.error(f"Traceback: {traceback.format_exc()}")
+            return {"error": f"Failed to fetch transactions: {str(e)}"}
+
+
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
+    
     
     async def main():
         env = SurfpoolEnv()
