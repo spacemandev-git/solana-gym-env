@@ -69,14 +69,16 @@ async function runSkill(): Promise<void> {
         process.exit(1);
     }
 
-    const timeoutMs = parseInt(timeoutMsStr, 10000);
+    const timeoutMs = parseInt(timeoutMsStr, 10);
     const code = Buffer.from(encodedCode, 'base64').toString('utf-8');
     const programs = Buffer.from(encodedPrograms, 'base64').toString('utf-8');
     const combinedCodePath = path.resolve("code.ts");
     const combinedCode =
+        "import { Connection, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL, Keypair } from '@solana/web3.js';\n" +
         "import * as web3 from '@solana/web3.js';\n" +
         "import * as anchor from '@coral-xyz/anchor';\n" +
-        "export async function main() {" + programs + "\n" + code + "}";
+        `const AGENT_WALLET_ADDRESS = "${agentPubkey}";\n` +
+        "export async function main() {\n" + programs + "\n" + code + "\n}";
     writeFileSync(combinedCodePath, combinedCode);
 
     transactionCount = 0;
@@ -101,6 +103,7 @@ async function runSkill(): Promise<void> {
         console.log(JSON.stringify({
             serialized_tx
         }));
+        process.exit(0);
     } catch (error) {
         const reason = error instanceof Error ? error.message : 'An unknown error occurred.';
         // For skill execution errors, return a proper error format
