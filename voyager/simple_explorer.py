@@ -8,8 +8,8 @@ import uuid
 
 from openai import AsyncOpenAI
 from skill_manager.ts_skill_manager import TypeScriptSkillManager
-from surfpool_env import SurfpoolEnv
-from known_programs import KNOWN_PROGRAM_IDS
+from voyager.surfpool_env import SurfpoolEnv
+from voyager.known_programs import KNOWN_PROGRAM_IDS
 from solders.transaction import Transaction
 import base64
 

@@ -1,3 +1,4 @@
+import base64
 import pdb
 import base58
 import gymnasium as gym
@@ -19,7 +20,8 @@ from solders.system_program import transfer, TransferParams, create_nonce_accoun
 from solders.message import MessageV0
 from solders.pubkey import Pubkey
 
-from known_programs import KNOWN_PROGRAM_IDS
+from voyager.known_programs import KNOWN_PROGRAM_IDS
+from voyager.skill_manager.ts_skill_manager import TypeScriptSkillManager
 
 load_dotenv(join(dirname(__file__), '.env'))
 
@@ -70,13 +72,16 @@ async def _surfpool_validator(rpc_url: str, *, backtrace: bool = True):
     finally:
         if proc.returncode is None:
             logging.info("Stopping surfpool [%s] …", proc.pid)
-            os.killpg(proc.pid, signal.SIGTERM)
             try:
+                os.killpg(proc.pid, signal.SIGTERM)
                 await asyncio.wait_for(proc.wait(), timeout=8)
             except asyncio.TimeoutError:
                 logging.warning("surfpool unresponsive; killing")
                 os.killpg(proc.pid, signal.SIGKILL)
                 await proc.wait()
+            except ProcessLookupError as e:
+                logging.warning("surfpool process already terminated")
+                
         logging.info("surfpool shut down")
 
 class SurfpoolEnv(gym.Env):
@@ -141,14 +146,16 @@ class SurfpoolEnv(gym.Env):
                 obs["last_tx_success"] = 0
                 obs["last_tx_error"] = str(receipt_dict.get("meta", {}).get("err"))
 
-        self.last_observation = obs
-        return obs
+        return [["observe", obs]]
 
     async def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         
-        if self._validator_cm:
-            await self._validator_cm.__aexit__(None, None, None)
+        try:
+            if self._validator_cm:
+                await self._validator_cm.__aexit__(None, None, None)
+        except Exception as e:
+            logging.error(f"Error closing validator: {e}", exc_info=True)
 
         # 2. Launch a fresh validator and wait until it’s live
         self._validator_cm = _surfpool_validator(self.rpc_url)
@@ -172,6 +179,34 @@ class SurfpoolEnv(gym.Env):
         observation = await self._get_observation()
         info = {} # No extra info on reset
         return observation, info
+
+
+    async def step2(self, code: str, programs: list[str], skill_manager: TypeScriptSkillManager):
+        """
+        Workaround to make it easy to call step()
+        """
+        result = skill_manager.evaluate_code(
+            code,
+            programs,
+            str(self.agent_keypair.pubkey()),
+            10000
+        )
+        events = [["observe",]]
+        if result.get('success', False):
+            blockhash_resp = await self.solana_env.client.get_latest_blockhash()
+            latest_blockhash_str = str(blockhash_resp.value.blockhash)
+            tx = VersionedTransaction.from_bytes(base64.b64decode(result['serialized_tx']))
+            tx.sign([self.agent_keypair], latest_blockhash_str)
+            obs, reward, terminated, truncated, info = await self.step(tx)
+            events.append(info)
+            events.append(obs)
+            return events, reward, terminated, truncated, info
+            # await self.client.confirm_transaction(sig.value, "confirmed", 30.0)
+            # result = await self.client.get_transaction(sig.value, commitment="confirmed")
+            # tx_receipt = result.value.transaction.to_json()
+            # self.last_tx_receipt = tx_receipt
+        else:
+            return events, 0, False, False, {}
 
     async def step(self, tx: VersionedTransaction):
         """
