@@ -14,11 +14,14 @@ from dotenv import load_dotenv
 from os.path import dirname, join
 
 from solana.rpc.async_api import AsyncClient, GetTransactionResp
+from solders.transaction import Transaction
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 from solders.system_program import transfer, TransferParams, create_nonce_account
-from solders.message import MessageV0
+from solders.message import MessageV0, to_bytes_versioned
 from solders.pubkey import Pubkey
+from solders.null_signer import NullSigner
+from solders.signature import Signature
 
 from voyager.known_programs import KNOWN_PROGRAM_IDS
 from voyager.skill_manager.ts_skill_manager import TypeScriptSkillManager
@@ -111,16 +114,23 @@ class SurfpoolEnv(gym.Env):
         self.last_observation = None
         self.last_tx_receipt = None
         self._validator_cm = None       # will hold the context-manager
-        self._validator_proc = None     # the running subprocess.Process
+        self._validator_proc = None     # the running subprocess
+        self.total_reward = 0           # Track cumulative reward for this episode.Process
 
 
     async def _get_observation(self, last_tx_result=None):
         # In a real implementation, you would fetch this data from the chain
+        # Get unique programs from the instructions seen
+        unique_programs = {str(k[0]) for k in self.program_instructions_seen.keys()}
+        
         obs = {
             "sol_balance": 0,
             "agent_pubkey": str(self.agent_keypair.pubkey()),
             "block_height": 0,
-            # "available_protocols": [] # This would be populated with known protocol addresses
+            "discovered_programs": len(unique_programs),
+            "discovered_program_list": list(unique_programs),  # Unique program IDs
+            "total_reward": self.total_reward,
+            "unique_instructions_found": len(self.program_instructions_seen)
         }
 
         try:
@@ -148,6 +158,34 @@ class SurfpoolEnv(gym.Env):
 
         return [["observe", obs]]
 
+    def _partial_sign_transaction(self, tx_bytes: bytes, additional_signers: list[Keypair]) -> VersionedTransaction:
+        """
+        Add additional signatures to a VersionedTransaction without overwriting existing ones.
+        
+        This implements partial signing for VersionedTransactions, similar to the 
+        partialSign method in the legacy Transaction class.
+        
+        Args:
+            tx_bytes: The serialized transaction bytes
+            additional_signers: List of Keypair objects to sign with
+            
+        Returns:
+            A VersionedTransaction with the additional signatures
+        """
+        # Deserialize the transaction
+        tx = VersionedTransaction.from_bytes(tx_bytes)
+        message = to_bytes_versioned(tx.message)
+        
+        sigs = tx.signatures
+        for idx, signer in enumerate(additional_signers):
+            sig = signer.sign_message(message)
+            sigs[idx] = sig
+
+        # NOTE: we have to assign the signatures all at once, we cannot assign by index
+        # due to quirk in the solders library / rust bridge
+        tx.signatures = sigs
+        return tx
+
     async def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         
@@ -164,6 +202,7 @@ class SurfpoolEnv(gym.Env):
         # Create a new agent for the episode
         self.agent_keypair = Keypair()
         self.program_instructions_seen = {}
+        self.total_reward = 0
         
         # Fund the agent
         try:
@@ -189,26 +228,40 @@ class SurfpoolEnv(gym.Env):
             code,
             programs,
             str(self.agent_keypair.pubkey()),
-            10000
+            60000  # Increased to 60 seconds for slow connections
         )
-        events = [["observe",]]
-        if result.get('success', False):
-            blockhash_resp = await self.solana_env.client.get_latest_blockhash()
-            latest_blockhash_str = str(blockhash_resp.value.blockhash)
-            tx = VersionedTransaction.from_bytes(base64.b64decode(result['serialized_tx']))
-            tx.sign([self.agent_keypair], latest_blockhash_str)
+        events = []
+        if result.get('success', False) and result.get('serialized_tx'):
+            # Deserialize the transaction
+            tx_bytes = base64.b64decode(result['serialized_tx'])
+            tx = self._partial_sign_transaction(tx_bytes, [self.agent_keypair])
+            
             obs, reward, terminated, truncated, info = await self.step(tx)
-            events.append(info)
-            events.append(obs)
+            events.append(("info", info))
+            # obs is already in the format [["observe", obs_dict]], so we need to extend, not append
+            events.extend(obs)
             return events, reward, terminated, truncated, info
-            # await self.client.confirm_transaction(sig.value, "confirmed", 30.0)
-            # result = await self.client.get_transaction(sig.value, commitment="confirmed")
-            # tx_receipt = result.value.transaction.to_json()
-            # self.last_tx_receipt = tx_receipt
         else:
-            return events, 0, False, False, {}
+            # Pass error information through
+            error_info = {
+                "error": result.get("reason", "Unknown error"),
+                "trace": result.get("trace", ""),
+                "stdout": result.get("stdout", ""),
+                "stderr": result.get("stderr", "")
+            }
+            
+            # Get observation with error details
+            obs = await self._get_observation()
+            # Add error details to the observation
+            if obs and len(obs) > 0 and len(obs[0]) > 1:
+                obs[0][1]["error"] = error_info["error"]
+                obs[0][1]["error_trace"] = error_info["trace"]
+            
+            events.append(("error", error_info))
+            events.extend(obs)
+            return events, 0, False, False, error_info
 
-    async def step(self, tx: VersionedTransaction):
+    async def step(self, tx):
         """
         Executes a pre-signed transaction on the Solana network.
         This is the core function of the low-level environment.
@@ -250,7 +303,18 @@ class SurfpoolEnv(gym.Env):
         self.last_tx_receipt = tx_receipt
         obs = await self._get_observation(last_tx_result=tx_receipt)
         
-        return obs, self._get_reward(result), False, False, { "tx_sig": str(sig.value), "tx_meta": result.value.to_json() }
+        # Extract programs from this transaction for the info dict
+        ordered_instructions = self._get_ordered_instructions(result)
+        programs_in_tx = list({str(ix['program_id']) for ix in ordered_instructions})
+        
+        reward = self._get_reward(result)
+        self.total_reward += reward
+        return obs, reward, False, False, { 
+            "tx_sig": str(sig.value), 
+            "tx_meta": result.value.to_json(),
+            "programs_interacted": programs_in_tx,
+            "reward": reward
+        }
 
     def _get_ordered_instructions(self, tx_result: GetTransactionResp) -> list[dict[str, bytes]]:
         inner_instructions = {ix.index: ix.instructions for ix in tx_result.value.transaction.meta.inner_instructions}
@@ -261,6 +325,7 @@ class SurfpoolEnv(gym.Env):
                 'program_id': message.account_keys[ix.program_id_index],
                 'data': base58.b58decode(ix.data),
             })
+            # pdb.set_trace()
             ordered_instructions.extend(
                 [{
                     'program_id': message.account_keys[inner_instruction.program_id_index],
@@ -283,7 +348,6 @@ class SurfpoolEnv(gym.Env):
                 self.program_instructions_seen[key] = True
                 logging.info(f"Discovered new program instruction ({str(key[0])}, {str(key[1])})")
         return reward
-
     
     def render(self, mode="human"):
         logging.info("Rendering not implemented for this environment.")
@@ -426,6 +490,7 @@ if __name__ == '__main__':
 
 
         if obs is not None:
+            # Test 1: Simple transfer
             recipient = Keypair().pubkey()
             instruction = transfer(
                 TransferParams(
@@ -437,6 +502,7 @@ if __name__ == '__main__':
             tx = await make_tx([instruction])
             render_step(await env.step(tx))
             
+            # Test 2: Another transfer with different amount
             instruction = transfer(
                 TransferParams(
                     from_pubkey=env.agent_keypair.pubkey(),
@@ -447,6 +513,7 @@ if __name__ == '__main__':
             tx = await make_tx([instruction])
             render_step(await env.step(tx))
 
+            # Test 3: Nonce account creation (requires multiple signers)
             nonce = Keypair()
             instructions = create_nonce_account(
                 env.agent_keypair.pubkey(),
@@ -456,6 +523,61 @@ if __name__ == '__main__':
             )
             tx = await make_tx(instructions, [nonce])
             render_step(await env.step(tx))
+            
+            # Test 4: Test partial signing with createAccount instruction
+            logging.info("\n--- Testing Partial Signing ---")
+            
+            # Create a transaction that requires multiple signers
+            new_account = Keypair()
+            from solders.system_program import create_account, CreateAccountParams
+            
+            # Calculate minimum rent exemption for 0 bytes
+            rent_exempt_balance = 890880  # Minimum for 0 bytes on Solana
+            
+            create_account_ix = create_account(
+                CreateAccountParams(
+                    from_pubkey=env.agent_keypair.pubkey(),
+                    to_pubkey=new_account.pubkey(),
+                    lamports=rent_exempt_balance,
+                    space=0,
+                    owner=Pubkey.from_string("11111111111111111111111111111111")
+                )
+            )
+            
+            # Create transaction but only sign with new_account first (simulating partial signing from TS)
+            message = MessageV0.try_compile(
+                payer=env.agent_keypair.pubkey(),
+                instructions=[create_account_ix],
+                address_lookup_table_accounts=[],
+                recent_blockhash=(await env.client.get_latest_blockhash()).value.blockhash
+            )
+            
+            # Create the transaction with these signatures
+            partial_tx = VersionedTransaction(message, [NullSigner(env.agent_keypair.pubkey()), new_account])
+            
+            # Serialize it
+            partial_tx_bytes = bytes(partial_tx)
+            logging.info(f"Partial tx: {base64.b64encode(partial_tx_bytes).decode()}")
+            
+            # Now test our partial signing method
+            logging.info(f"Testing partial signing - adding agent signature to partially signed tx")
+            fully_signed_tx = env._partial_sign_transaction(partial_tx_bytes, [env.agent_keypair])
+            logging.info(f"Fully signed tx: {base64.b64encode(bytes(fully_signed_tx)).decode()}")
+            logging.info(f"Fully signed tx: {fully_signed_tx.signatures}")
+            logging.info(f"Fully signed tx: {fully_signed_tx.verify_with_results()}")
+            
+            # Verify signatures
+            logging.info(f"Signatures after partial signing:")
+            for i, sig in enumerate(fully_signed_tx.signatures):
+                if sig and sig != Signature.default():
+                    # Convert signature to string for display
+                    sig_str = str(sig)
+                    logging.info(f"  Index {i}: {sig_str[:8]}... (present)")
+                else:
+                    logging.info(f"  Index {i}: None or default")
+            
+            # Send the transaction
+            render_step(await env.step(fully_signed_tx))
 
 
         await env.close()
