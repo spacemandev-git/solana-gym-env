@@ -35,11 +35,11 @@ class EventRecorder:
         #         events[0][1]["status"]["position"]["x"],
         #         events[0][1]["status"]["position"]["z"],
         #     ]
-        for event_type, event in events:
-            self.update_items(event)
-            if event_type == "observe":
-                self.update_elapsed_time(event)
-        print(
+        # for event_type, event in events:
+            # self.update_items(event)
+            # if event_type == "observe":
+            #     self.update_elapsed_time(event)
+        logging.info(
             f"\033[96m****Recorder message: {self.elapsed_time} ticks have elapsed****\033[0m\n"
             f"\033[96m****Recorder message: {self.iteration} iteration passed****\033[0m"
         )
@@ -69,29 +69,30 @@ class EventRecorder:
                     events[0][1]["status"]["position"]["z"],
                 )
             for event_type, event in events:
-                self.update_items(event)
+                # self.update_items(event)
                 self.update_position(event)
                 if event_type == "observe":
                     self.update_elapsed_time(event)
 
     def update_items(self, event):
-        inventory = event["inventory"]
-        elapsed_time = event["status"]["elapsedTime"]
-        biome = event["status"]["biome"]
-        items = set(inventory.keys())
-        new_items = items - self.item_history
-        self.item_history.update(items)
-        self.biome_history.add(biome)
-        if new_items:
-            if self.elapsed_time + elapsed_time not in self.item_vs_time:
-                self.item_vs_time[self.elapsed_time + elapsed_time] = []
-            self.item_vs_time[self.elapsed_time + elapsed_time].extend(new_items)
-            if self.iteration not in self.item_vs_iter:
-                self.item_vs_iter[self.iteration] = []
-            self.item_vs_iter[self.iteration].extend(new_items)
+        pass
+        # inventory = event["inventory"]
+        # elapsed_time = event["status"]["elapsedTime"]
+        # biome = event["status"]["biome"]
+        # items = set(inventory.keys())
+        # new_items = items - self.item_history
+        # self.item_history.update(items)
+        # self.biome_history.add(biome)
+        # if new_items:
+        #     if self.elapsed_time + elapsed_time not in self.item_vs_time:
+        #         self.item_vs_time[self.elapsed_time + elapsed_time] = []
+        #     self.item_vs_time[self.elapsed_time + elapsed_time].extend(new_items)
+        #     if self.iteration not in self.item_vs_iter:
+        #         self.item_vs_iter[self.iteration] = []
+        #     self.item_vs_iter[self.iteration].extend(new_items)
 
-    def update_elapsed_time(self, event):
-        self.elapsed_time += event["status"]["elapsedTime"]
+    # def update_elapsed_time(self, event):
+        # self.elapsed_time += event["status"]["elapsedTime"]
 
     def update_position(self, event):
         position = [
