@@ -1,4 +1,3 @@
-
 from datetime import datetime
 import json
 import logging
@@ -6,12 +5,17 @@ import os
 import pdb
 import uuid
 
+
+from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from skill_manager.ts_skill_manager import TypeScriptSkillManager
+from voyager.skill_manager.ts_skill_manager import TypeScriptSkillManager
 from voyager.surfpool_env import SurfpoolEnv
 from voyager.known_programs import KNOWN_PROGRAM_IDS
 from solders.transaction import Transaction
 import base64
+
+# Configure logging at module level for debugging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 SYSTEM_PROMPT = """
 You are an expert Solana developer, attempting to show off how many different programs you can interact with.
@@ -31,7 +35,10 @@ Important clarification:
 Use the tools to learn how transactions work against different programs, and then write Typescript functions to create transactions 
 for new programs and new instructions.
 
-You get more points for interacting with new programs and new instructions.
+You get more points for interacting with new programs and new instructions. You want to maximize the number of programs you interact with.
+
+NOTE: when you are creating new accounts, sometimes you will need to sign with the keypair of the account you are creating. Please do so in your code.
+The environment will then sign on behalf of your agent's pubkey after serialization.
 
 === TYPESCRIPT SKILL TEMPLATE ===
 ```typescript
@@ -173,10 +180,26 @@ FUNCTIONS = [
 
 class SimpleExplorer():
     def __init__(self):
+        logging.info("Initializing SimpleExplorer...")
         self.env = SurfpoolEnv(rpc_url="https://api.mainnet-beta.solana.com")
         self.messages = []
         self.run_id = datetime.now().strftime("%y-%m-%d") + "_" + str(int(datetime.now().timestamp()))
-        self.skills = TypeScriptSkillManager(skill_root=f"./skills/{self.run_id}")
+        
+        # Create checkpoint directory for this run
+        ckpt_dir = f"simple_explorer_ckpt/{self.run_id}"
+        os.makedirs(ckpt_dir, exist_ok=True)
+        logging.info(f"Created checkpoint directory: {ckpt_dir}")
+        
+        logging.info("Initializing TypeScriptSkillManager...")
+        self.skills = TypeScriptSkillManager(
+            model_name="openai/gpt-4o-mini",
+            ckpt_dir=ckpt_dir,
+            resume=False
+        )
+        logging.info("TypeScriptSkillManager initialized successfully")
+        
+        # Ensure traces directory exists
+        os.makedirs("traces", exist_ok=True)
         # self.model = 'tencent/hunyuan-a13b-instruct:free'
         self.model = "x-ai/grok-3-mini"
         # self.model = "mistralai/mistral-small-3.2-24b-instruct:free"
@@ -230,10 +253,14 @@ class SimpleExplorer():
                     logging.info(f"Function call: {function_name} with args: {function_args}")
                     if function_name == "executeSkill":
                         skill_name = function_args["skill_name"]
-                        skill_file_path = self.skills.get_skills().get(skill_name, None)
-                        if skill_file_path is None:
+                        skills = self.skills.get_skills()
+                        skill_entry = skills.get(skill_name, None)
+                        
+                        if skill_entry is None:
                             tool_message["content"] = f"Skill {skill_name} not found"
                         else:
+                            # Use new format - construct the file path
+                            skill_file_path = os.path.join(self.skills.ckpt_dir, "skill", "code", f"{skill_name}.ts")
                             try:
                                 # Pass agent pubkey and latest blockhash to skill execution
                                 agent_pubkey = str(self.env.agent_keypair.pubkey())
@@ -245,7 +272,13 @@ class SimpleExplorer():
                                 result = self.skills.execute_skill(skill_file_path, agent_pubkey=agent_pubkey, latest_blockhash=latest_blockhash_str)
                                 tx_data = result.get("serialized_tx")
                                 if not tx_data:
-                                    tool_message["content"] = f"Error executing skill {skill_name}: {json.dumps(result)}"
+                                    error_details = {
+                                        "error": "Skill execution failed",
+                                        "skill_name": skill_name,
+                                        "details": result,
+                                        "suggestion": "Check for syntax errors, missing imports, or typos in the skill code"
+                                    }
+                                    tool_message["content"] = json.dumps(error_details)
                                 else:
                                     # Get transaction data from skill result
                                     tx_bytes = base64.b64decode(tx_data)
@@ -262,12 +295,12 @@ class SimpleExplorer():
                                     obs, step_reward, _, _, info = await self.env.step(tx)
                                     reward += step_reward
                                     
-                                    logging.info(f"Reward: {step_reward}, total reward: {reward}")
+                                    logging.info(f"Step reward: {step_reward}, cumulative step rewards: {reward}, total session reward: {self.reward + reward}")
                                     tool_message["content"] = f"{json.dumps({ 'observation': obs, 'info': info, 'reward': step_reward })}"
                                             
                             except Exception as e:
-                                logging.error(f"Error running skill {skill_id}: {e}")
-                                tool_message["content"] = f"Exception in skill {skill_id}: {e}"
+                                logging.error(f"Error running skill {skill_name}: {e}")
+                                tool_message["content"] = f"Exception in skill {skill_name}: {e}"
 
                     elif function_name == "fetchTransactions":
                         program_id = function_args["program_id"]
@@ -276,8 +309,20 @@ class SimpleExplorer():
                     elif function_name == "writeSkill":
                         skill_name = function_args["skill_name"]
                         skill_code = function_args["skill_code"]
-                        skill_id = self.skills.register(skill_name, skill_code)
-                        tool_message["content"] = f"Skill {skill_name} written to file system with id {skill_id}"
+                        # Save skill file directly
+                        skill_dir = f"{self.skills.ckpt_dir}/skill/code"
+                        file_path = os.path.join(skill_dir, f"{skill_name}.ts")
+                        with open(file_path, "w") as f:
+                            f.write(skill_code)
+                        
+                        # Use the add_new_skill method to register it properly
+                        skill_info = {
+                            'program_name': skill_name,
+                            'program_code': skill_code
+                        }
+                        self.skills.add_new_skill(skill_info)
+                        
+                        tool_message["content"] = f"Skill {skill_name} written to {file_path}"
                     elif function_name == "readSkills":
                         skills = list(self.skills.get_skills().keys())
                         tool_message["content"] = json.dumps(skills)
@@ -291,16 +336,16 @@ class SimpleExplorer():
 
     async def rollout(self):
         logging.info("Starting rollout")
-        observation, info = await self.reset()
+        observation, _ = await self.reset()
         logging.info(f"Observation: {observation}")
         self.messages.append({
             'role': 'user',
             'content': f"Last observation: {observation}"
         })
         while True:
-            reward, done = await self.step()
-            self.reward += reward
-            logging.info(f"Total reward: {self.reward}")
+            step_rewards, done = await self.step()
+            self.reward += step_rewards
+            logging.info(f"Step completed. Rewards this step: {step_rewards}, Total session reward: {self.reward}")
             if done:
                 break
         return self.reward, False
@@ -318,16 +363,22 @@ class SimpleExplorer():
         }]
         return observation, info
 
-if __name__ == "__main__":
+def run_simple_explorer():
     import asyncio
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    
+    # Load environment variables from .env file
+    load_dotenv()
+    
+    # Reconfigure logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
 
     async def main():
         explorer = SimpleExplorer()
         logging.info("Starting rollout")
-        total_reward, done = await explorer.rollout()
+        total_reward, _ = await explorer.rollout()
         logging.info(f"Total reward: {total_reward}")
     
     asyncio.run(main())
-    # import json
-    # print(json.dumps(FUNCTIONS, ensure_ascii=False, indent=2).replace("\'", "\""))
+
+if __name__ == "__main__":
+    run_simple_explorer()
