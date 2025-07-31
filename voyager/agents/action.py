@@ -1,12 +1,15 @@
 # TODO(ngundotra): figure out what sort of events should go in the chatlog
+import os
 import pdb
 import re
 import time
+import logging
 
 import voyager.utils as U
 from voyager.prompts import load_prompt
 from javascript import require
 from langchain_openai import ChatOpenAI
+# from langchain_anthropic import ChatAnthropic
 from langchain.prompts import SystemMessagePromptTemplate
 from langchain.schema import HumanMessage, AIMessage, SystemMessage
 
@@ -31,13 +34,19 @@ class ActionAgent:
         #     logging.info(f"\033[32mLoading Action Agent from {ckpt_dir}/action\033[0m")
         # else:
         self.llm = ChatOpenAI(
+            base_url="https://openrouter.ai/api/v1",
             model=model_name,
+            api_key=os.getenv("OPENROUTER_API_KEY"),
             temperature=temperature,
-            request_timeout=request_timeout,
         )
 
     def render_system_message(self, skills=[]):
         system_template = load_prompt("action_template")
+        # Debug logging
+        logging.info(f"render_system_message received {len(skills)} skills")
+        if skills:
+            for i, skill in enumerate(skills):
+                logging.info(f"Skill {i}: type={type(skill)}, len={len(skill) if isinstance(skill, str) else 'N/A'}, first 50 chars: {repr(skill[:50]) if isinstance(skill, str) else repr(skill)[:50]}")
         programs = "\n\n".join(skills)
         response_format = load_prompt("action_response_format")
         system_message_prompt = SystemMessagePromptTemplate.from_template(
@@ -52,21 +61,29 @@ class ActionAgent:
     def render_human_message(
         self, *, events, code="", task="", context="", critique=''
     ):
-        chat_messages = []
         error_messages = []
-        assert events[-1][0] == "observe", "Last event must be observe"
-        for i, (event_type, event) in enumerate(events):
-            # todo: add other event types
-            if event_type == "observe":
-                # todo: add observation
-                assert i == len(events) - 1, "observe must be the last event"
+        obs_data = {}
+        
+        # Process events to extract observations and errors
+        for event_type, event in events:
+            if event_type == "observe" and isinstance(event, dict):
+                obs_data = event
+            elif event_type == "error":
+                if isinstance(event, dict):
+                    # Extract detailed error information
+                    error_msg = event.get("error", "Unknown error")
+                    if event.get("trace"):
+                        error_msg += f"\nTrace: {event['trace']}"
+                    error_messages.append(error_msg)
+                else:
+                    error_messages.append(str(event))
             
         observation = ""
 
         if code:
             observation += f"Code from the last round:\n{code}\n\n"
         else:
-            observation += f"Code form the last round: No code in the first round\n\n"
+            observation += f"Code from the last round: No code in the first round\n\n"
         
         if self.execution_error:
             if error_messages:
@@ -74,15 +91,30 @@ class ActionAgent:
                 observation += f"Execution error:\n{error}\n\n"
             else:
                 observation += f"Execution error: No error\n\n"
+        
+        # Add Solana-specific observations
+        if obs_data:
+            observation += f"Wallet balances: [SOL: {obs_data.get('sol_balance', 0):.4f}]\n"
+            observation += f"Agent wallet address: {obs_data.get('agent_pubkey', 'Unknown')}\n"
+            observation += f"Block height: {obs_data.get('block_height', 0)}\n"
+            observation += f"Discovered protocols: {obs_data.get('discovered_programs', 0)}\n"
             
-        if self.chat_log:
-            if chat_messages:
-                chat_log = "\n".join(chat_messages)
-                observation += f"Chat log: {chat_log}\n\n"
-            else:
-                observation += f"Chat log: None\n\n"
+            # Add discovered instructions by program
+            if obs_data.get('discovered_instructions_by_program'):
+                observation += f"Discovered instructions by program: {obs_data['discovered_instructions_by_program']}\n"
             
-        # todo: flesh out observation here
+            # Add transaction efficiency metrics
+            observation += f"Last transaction instruction count: {obs_data.get('last_tx_instruction_count', 0)}\n"
+            observation += f"Last transaction reward: {obs_data.get('last_tx_reward', 0)}\n"
+            observation += f"Total reward: {obs_data.get('total_reward', 0)}\n"
+            
+            if obs_data.get('discovered_program_list'):
+                observation += f"Discovered protocol list: {', '.join(obs_data['discovered_program_list'][:5])}"
+                if len(obs_data['discovered_program_list']) > 5:
+                    observation += f" (and {len(obs_data['discovered_program_list']) - 5} more)"
+                observation += "\n"
+            observation += "\n"
+        
         observation += f"Task: {task}\n\n"
         if context:
             observation += f"Context: {context}\n\n"
@@ -139,13 +171,13 @@ class ActionAgent:
                     main_function is not None
                 ), "No async function found. Your main function must be async."
 
-                # todo(ngundotra): make this more flexible
+                # For Solana, we don't need any parameters
+                # The function should just build and return a transaction
                 assert (
-                    len(main_function["params"]) == 1 and
-                    main_function["params"][0].name == "bot"
-                ), f"Main function {main_function['name']} must have exactly one parameter named 'bot'."
+                    len(main_function["params"]) == 0
+                ), f"Main function {main_function['name']} must have no parameters for Solana transactions."
                 program_code = "\n\n".join(function["body"] for function in functions)
-                exec_code = f"await {main_function['name']}();"
+                exec_code = f"return await {main_function['name']}();"
                 return {
                     "program_code": program_code,
                     "program_name": main_function["name"],

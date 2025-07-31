@@ -8,6 +8,7 @@ dependencies = [
     "chromadb>=1.0.15",
     "javascript>=1!1.2.2",
     "langchain>=0.3.26",
+    "langchain-anthropic>=0.3.17",
     "langchain-openai>=0.3.28",
     "openai>=1.93.0",
     "setuptools>=80.9.0",

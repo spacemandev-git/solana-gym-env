@@ -1,6 +1,10 @@
 import logging
+import os
+import pdb
 from voyager.prompts import load_prompt
-from langchain.chat_models.openai import ChatOpenAI
+# from langchain.chat_models.openai import ChatOpenAI
+from langchain_openai import ChatOpenAI
+# from langchain_anthropic import ChatAnthropic
 from langchain.schema import SystemMessage, HumanMessage
 
 from voyager.utils.json_utils import fix_and_parse_json
@@ -15,8 +19,10 @@ class CriticAgent:
         mode="auto",
     ):
         self.llm = ChatOpenAI(
+            base_url="https://openrouter.ai/api/v1",
             model=model_name,
             temperature=temperature,
+            api_key=os.getenv("OPENROUTER_API_KEY"),
             request_timeout=request_timeout,
         )
         assert mode in ["auto", "manual"]
@@ -34,20 +40,54 @@ class CriticAgent:
         task,
         context,
     ):
-        assert events[-1][0] == "observe", "Last event must be observe"
-        for _, (event_type, event) in enumerate(events):
-            if event_type == "error":
-                logging.info(
-                    f"\033[31mCritic Agent: Error occurs {event['onError']}\033[0m"
-                )
-                return None
+        # Extract transaction result and balance info from events
+        tx_result = "failed"
+        tx_sig = None
+        error_msg = None
+        error_trace = None
+        balances_before = {}
+        balances_after = {}
+        programs_interacted = []
+        
+        # pdb.set_trace()
+        for event_type, event in events:
+            if event_type == "observe" and isinstance(event, dict):
+                logging.info(f"Event: {event}")
+                # This is the observation data
+                if "sol_balance" in event:
+                    if not balances_before:
+                        balances_before = {"SOL": event.get("sol_balance", 0)}
+                    else:
+                        balances_after = {"SOL": event.get("sol_balance", 0)}
+            elif isinstance(event, dict):
+                if "tx_sig" in event:
+                    tx_result = "success"
+                    tx_sig = event.get("tx_sig")
+                    # Use programs_interacted directly from the info dict
+                    if "programs_interacted" in event:
+                        programs_interacted = event["programs_interacted"]
+                elif "error" in event:
+                    error_msg = event["error"]
+                    if "trace" in event:
+                        error_trace = event["trace"]
                 
         observation = ""
-        observation += f"Task: {task}\n\n"
+        observation += f"Transaction Result: {tx_result}\n"
+        if tx_sig:
+            observation += f"Transaction Signature: {tx_sig}\n"
+        if error_msg:
+            observation += f"Error Message: {error_msg}\n"
+        if error_trace:
+            observation += f"Error Trace: {error_trace}\n"
+        if balances_before.get('SOL', -1) != -1:
+            observation += f"Wallet Balances Before: [SOL: {balances_before.get('SOL'):.4f}]\n"
+        if balances_after.get('SOL', -1) != -1:
+            observation += f"Wallet Balances After: [SOL: {balances_after.get('SOL'):.4f}]\n"
+        if programs_interacted:
+            observation += f"Programs Interacted: {programs_interacted}\n"
+        observation += f"\nTask: {task}\n"
         if context:
-            observation += f"Context: {context}\n\n"
-        else:
-            observation += f"Context: None\n\n"
+            observation += f"\nContext: {context}\n"
 
         logging.info(
             f"\033[31m****Critic Agent human message****\n{observation}\033[0m"
@@ -59,7 +99,7 @@ class CriticAgent:
         success = False
         critique = ""
         while not confirmed:
-            success = input("Succes? (y/n)")
+            success = input("Success? (y/n)")
             success = success.lower() == "y"
             critique = input("Enter your critique: ")
             logging.info(f"Success: {success}\nCritique: {critique}")
@@ -76,11 +116,12 @@ class CriticAgent:
         if messages[1] is None:
             return False, ""
         
-        critic = self.llm(messages).contet
+        critic = self.llm.invoke(messages).content
         logging.info(f"\033[31m****Critic Agent ai message****\n{critic}\033[0m")
         try:
+            # pdb.set_trace()
             response = fix_and_parse_json(critic)
-            assert response["success"] in ["True", "False"], "Critic Agent response must contain a boolean success field"
+            assert response["success"] in ["True", "False", 'true', 'false', True, False], "Critic Agent response must contain a boolean success field"
             if "critique" not in response:
                 response["critique"] = ""
             return response["success"], response["critique"]
@@ -98,7 +139,7 @@ class CriticAgent:
         context,
         max_retries=5,
     ):
-        human_message = self.render_system_message(
+        human_message = self.render_human_message(
             events=events,
             task=task,
             context=context,

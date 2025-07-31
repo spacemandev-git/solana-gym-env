@@ -1,15 +1,14 @@
-import re
-import time
-import logging
-from javascript import require
-from langchain.schema import SystemMessage, HumanMessage
+import os
 import pdb
+import re
+import logging
+from langchain.schema import SystemMessage, HumanMessage
 
 from voyager.prompts import load_prompt
 import voyager.utils as U
-from langchain_openai import ChatOpenAI
-from langchain_openai import OpenAIEmbeddings
-from langchain.vectorstores import Chroma
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import Chroma
+from voyager.known_programs import KNOWN_PROGRAM_IDS
 
 class CurriculumAgent:
     def __init__(
@@ -25,19 +24,23 @@ class CurriculumAgent:
         warm_up=None,
     ):
         self.llm = ChatOpenAI(
-            model_name=model_name,
+            base_url="https://openrouter.ai/api/v1",
+            model=model_name,
             temperature=temperature,
             request_timeout=request_timeout,
+            api_key=os.getenv("OPENROUTER_API_KEY"),
         )
         self.qa_llm = ChatOpenAI(
-            model_name=qa_model_name,
+            base_url="https://openrouter.ai/api/v1",
+            model=qa_model_name,
             temperature=qa_temperature,
             request_timeout=request_timeout,
+            api_key=os.getenv("OPENROUTER_API_KEY"),
         )
         assert mode in ["auto", "manual"], "Mode must be either auto or manual"
         self.mode = mode
         self.ckpt_dir = ckpt_dir
-        U.f_mkdir("self.ckpt_dir/curriculum/vectordb")
+        U.f_mkdir(f"{self.ckpt_dir}/curriculum/vectordb")
         if resume:
             logging.info(
                 f"\033[35mLoading Curriculum Agent from {ckpt_dir}/curriculum\033[0m"
@@ -92,21 +95,74 @@ class CurriculumAgent:
         return system_message
 
     def render_observation(self, *, events):
+        # pdb.set_trace()
         assert events[-1][0] == "observe", "Last event must be observe"
-        observation = ""
+        obs_data = events[-1][1]
+        
+        # Handle double-wrapped observation from _get_observation
+        if isinstance(obs_data, list) and len(obs_data) > 0 and obs_data[0][0] == "observe":
+            obs_data = obs_data[0][1]
+        
+        # Build a comprehensive observation for the curriculum agent
+        observation = f"Wallet balances: SOL={obs_data.get('sol_balance', 0):.3f}\n"
+        observation += f"Block height: {obs_data.get('block_height', 0)}\n"
+        observation += f"Total reward earned: {obs_data.get('total_reward', 0)}\n"
+        observation += f"Unique instructions discovered: {obs_data.get('unique_instructions_found', 0)}\n"
+        observation += f"Discovered protocols: {obs_data.get('discovered_programs', 0)} unique programs\n"
+        observation += f"Known protocols: {', '.join(obs_data.get('discovered_program_list', []))}\n"
+        
+        # CRITICAL: Add discovered instructions by program so AI knows what NOT to repeat
+        discovered_by_program = obs_data.get('discovered_instructions_by_program', {})
+        if discovered_by_program:
+            observation += "\nDiscovered instructions by program:\n"
+            for prog_id, instruction_ids in discovered_by_program.items():
+                prog_short = prog_id[:4] + "..." + prog_id[-4:] if len(prog_id) > 10 else prog_id
+                observation += f"  - {prog_short}: instruction IDs {sorted(instruction_ids)}\n"
+        
+        # Add available programs to explore
+        if KNOWN_PROGRAM_IDS:
+            # Show a sample of unexplored programs (only those with names)
+            unexplored_programs = []
+            for prog_id, prog_name in KNOWN_PROGRAM_IDS.items():
+                if prog_name and prog_name.strip() and prog_id not in discovered_by_program:
+                    unexplored_programs.append(f"{prog_name} ({prog_id[:8]}...)")
+                if len(unexplored_programs) >= 10:  # Show first 10 unexplored
+                    break
+            
+            if unexplored_programs:
+                total_unexplored = sum(1 for pid, pname in KNOWN_PROGRAM_IDS.items() 
+                                     if pname and pname.strip() and pid not in discovered_by_program)
+                observation += f"\nAvailable programs to explore (showing {len(unexplored_programs)} of {total_unexplored} unexplored):\n"
+                for prog in unexplored_programs:
+                    observation += f"  - {prog}\n"
+        
+        observation += f"\nCompleted tasks so far: {', '.join(self.completed_tasks[-5:])}\n"  # Last 5 tasks
+        observation += f"Failed tasks that are too hard: {', '.join(self.failed_tasks[-3:])}\n"  # Last 3 failures
+        
+        # Add reward information from recent events
+        recent_rewards = []
+        for event_type, event_data in events[-10:]:  # Look at last 10 events
+            if event_type == "info" and isinstance(event_data, dict):
+                if "programs_interacted" in event_data:
+                    observation += f"Recent transaction used: {', '.join(event_data['programs_interacted'])}\n"
+                if "reward" in event_data:
+                    recent_rewards.append(event_data["reward"])
+        
+        if recent_rewards:
+            observation += f"Recent transaction rewards: {recent_rewards}\n"
+        
         return observation
 
     def render_human_message(self, *, events):
         """todo(ngundotra): flesh out observation"""
-        content = ""
         observation = self.render_observation(events=events)
-        pdb.set_trace()
-        return HumanMessage(content=content)
+        # pdb.set_trace()
+        return HumanMessage(content=observation)
 
     def propose_next_task(self, *, events, max_retries=5):
         if self.progress == 0 and self.mode == "auto":
-            task = "Mine 1 wood log"
-            context = "You can mine one of oak, birch, spruce, jungle, acacia, dark oak or mangrove logs."
+            task = "Transfer 0.1 SOL to a new address"
+            context = "Create a simple SOL transfer transaction. Generate a random recipient address using Keypair.generate().publicKey for testing."
             return task, context
 
         # hard code task when invenv
@@ -117,7 +173,7 @@ class CurriculumAgent:
             )
         ]
         if self.mode == "auto":
-            return self.propose_next_ai_task()
+            return self.propose_next_ai_task(messages=messages, max_retries=max_retries)
         elif self.mode == "manual":
             return self.propose_next_ai_task(messages=messages, max_retries=max_retries)
         else:
@@ -126,7 +182,7 @@ class CurriculumAgent:
     def propose_next_ai_task(self, *, messages, max_retries=5):
         if max_retries == 0:
             raise RuntimeError("Max retries reached, failed to propose ai task.")
-        curriculum = self.llm(messages).contet
+        curriculum = self.llm.invoke(messages).content
         logging.info(
            f"\033[31m****Curriculum Agent ai message****\n{curriculum}\033[0m" 
         )
@@ -253,8 +309,27 @@ class CurriculumAgent:
         return questions, answers
 
     def get_task_context(self, task):
+        # For simple/common operations, provide minimal context to speed up exploration
+        simple_tasks = ["transfer", "create account", "create token account", "swap", "close account", "mint", "burn", "approve"]
+        if any(simple in task.lower() for simple in simple_tasks):
+            # Provide quick programmatic context without lengthy Q&A
+            context_map = {
+                "transfer": "Use web3.SystemProgram.transfer({fromPubkey, toPubkey, lamports}) for SOL. Generate random recipient: web3.Keypair.generate().publicKey. For SPL tokens use Token.transfer().",
+                "create account": "For a new SOL account, just transfer SOL to a new address (web3.Keypair.generate().publicKey). Use SystemProgram.createAccount() only for data accounts with specific space requirements.",
+                "create token account": "Use getOrCreateAssociatedTokenAccount() from @solana/spl-token, or create manually with TOKEN_PROGRAM_ID instructions.",
+                "swap": "Use DEX SDK (Orca/Raydium). Basic pattern: 1) Get pool info 2) Calculate amounts 3) Create swap instruction 4) Add to transaction.",
+                "close account": "Use TOKEN_PROGRAM_ID closeAccount instruction to close SPL token accounts and recover rent to owner.",
+                "mint": "Use TOKEN_PROGRAM_ID mintTo instruction. Requires mint authority signature.",
+                "burn": "Use TOKEN_PROGRAM_ID burn instruction to destroy tokens from an account.",
+                "approve": "Use TOKEN_PROGRAM_ID approve instruction to delegate spending authority."
+            }
+            for key, value in context_map.items():
+                if key in task.lower():
+                    return f"Task: {task}\nProgrammatic approach: {value}"
+        
+        # For complex tasks, use the Q&A system
         question = (
-            f"How to {task.replace('_', ' ').strip().lower()} in Minecraft?"
+            f"How to {task.replace('_', ' ').strip().lower()} on Solana?"
         )
         if question in self.qa_cache:
             answer = self.qa_cache[question]
@@ -283,13 +358,13 @@ class CurriculumAgent:
         return HumanMessage(content=content)
 
     def run_qa_step1_ask_questions(self, *, events):
-        biome = "beep"
+        # Base questions about Solana fundamentals
         questions = [
-            f"What are the blocks that I can find in the {biome} in Minecraft?",
-            f"What are the items that I can find in the {biome} in Minecraft?",
-            f"What are the mobs that I can find in the {biome} in Minecraft?",
+            "What are the basic programs available on Solana?",
+            "How to interact with the Token Program on Solana?",
+            "What are the common DeFi protocols on Solana?",
         ]
-        concepts = [biome, biome, biome]
+        concepts = ["Solana programs", "Token Program", "DeFi protocols"]
         messages = [
             self.render_system_message_qa_step1_ask_questions(),
             self.render_human_message_qa_step1_ask_questions(
@@ -327,7 +402,7 @@ class CurriculumAgent:
         logging.info(
            f"\033[35mCurriculum Agent Question: {question}\033[0m" 
         )
-        qa_answer = self.qa_llm(messages).content
+        qa_answer = self.qa_llm.invoke(messages).content
         logging.info(
             f"\033[35mCurriculum Agent : {qa_answer}\033[0m"
         )
