@@ -1,15 +1,17 @@
 import logging
+import pdb
 import subprocess
 import json
 import os
-import pdb
 from typing import Any, Dict, List
 
 import voyager.utils as U
 from voyager.prompts import load_prompt
-from langchain.chat_models.openai import ChatOpenAI
-from langchain.vectorstores import Chroma
-from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
+# from langchain_anthropic import ChatAnthropic
+# from langchain_openrouter
+from langchain_community.vectorstores import Chroma
+from langchain_openai import OpenAIEmbeddings
 from langchain.schema import SystemMessage, HumanMessage
 
 class TypeScriptSkillManager:
@@ -20,14 +22,14 @@ class TypeScriptSkillManager:
         retrieval_top_k=5,
         request_timeout=120,
         ckpt_dir="ckpt",
-        resume=False,
-        # Old code
-        skill_root="skills"
+        resume=False
     ):
         self.llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            temperature=0.0,
+            base_url="https://openrouter.ai/api/v1",
+            model=model_name,
+            temperature=temperature,
             request_timeout=request_timeout,
+            api_key=os.getenv("OPENROUTER_API_KEY"),
         )
         U.f_mkdir(f"{ckpt_dir}/skill/code")
         U.f_mkdir(f"{ckpt_dir}/skill/description")
@@ -42,9 +44,10 @@ class TypeScriptSkillManager:
             self.skills = {}
         self.retrieval_top_k = retrieval_top_k
         self.ckpt_dir = ckpt_dir
+        embeddings = OpenAIEmbeddings()
         self.vectordb = Chroma(
             collection_name="skill_vectordb",
-            embedding_function=OpenAIEmbeddings(),
+            embedding_function=embeddings,
             persist_directory=f"{ckpt_dir}/skill/vectordb",
         )
         assert self.vectordb._collection.count() == len(self.skills), (
@@ -54,20 +57,26 @@ class TypeScriptSkillManager:
             f"You may need to manually delete the vectordb directory for running from scratch."
         )        
 
-        # Old code
-        self.skills_dir = skill_root
-        self.skills = {}
-        self.next_skill_id = 0
-        if not os.path.exists(self.skills_dir):
-            os.makedirs(self.skills_dir)
-        self._load_existing_skills()
+        # Old code - DISABLED to prevent overwriting self.skills
+        # self.skills_dir = skill_root
+        # self.skills = {}  # This would overwrite the proper skills dict!
+        # self.next_skill_id = 0
+        # if not os.path.exists(self.skills_dir):
+        #     os.makedirs(self.skills_dir)
+        # self._load_existing_skills()  # This sets skills to strings instead of dicts
 
     @property
     def programs(self):
-        programs = ""
+        programs = []
         for skill_name, entry in self.skills.items():
-            programs += f"{entry['code']}\n\n"
+            # Debug logging
+            if isinstance(entry, dict) and 'code' in entry:
+                logging.info(f"Adding skill {skill_name} with code length: {len(entry['code'])}")
+                programs.append(entry['code'])
+            else:
+                logging.warning(f"Skill {skill_name} has unexpected format: {type(entry)}")
         # todo(ngundotra): add primitives
+        logging.info(f"Total programs length: {len(programs)}, first 200 chars: {programs[:200]}")
         return programs
 
     # todo(ngundotra): fix this
@@ -119,7 +128,7 @@ class TypeScriptSkillManager:
                 + f"The main function is `{program_name}`."
             ),
         ]
-        skill_description = f"    // { self.llm(messages).content}"
+        skill_description = f"    // { self.llm.invoke(messages).content}"
         return f"async function {program_name}() {{\n{skill_description}\n}}"
 
     def retrieve_skills(self, query: str):
@@ -136,7 +145,15 @@ class TypeScriptSkillManager:
         )
         skills = []
         for doc, _ in docs_and_scores:
-            skills.append(self.skills[doc.metadata['name']['code']]) 
+            skill_name = doc.metadata['name']
+            skill_entry = self.skills.get(skill_name)
+            if isinstance(skill_entry, dict) and 'code' in skill_entry:
+                skill_code = skill_entry['code']
+                logging.info(f"Retrieved skill {skill_name}, code length: {len(skill_code)}, first 50 chars: {repr(skill_code[:50])}")
+                skills.append(skill_code)
+            else:
+                logging.error(f"Skill {skill_name} has unexpected format: {type(skill_entry)}, content: {repr(skill_entry)[:100]}")
+        logging.info(f"retrieve_skills returning {len(skills)} skills")
         return skills
 
 
@@ -156,7 +173,8 @@ class TypeScriptSkillManager:
             agent_pubkey,
             str(timeout_ms),
         ]
-        logging.info(f"Running skill runner with command: {command}")
+        logging.info(f"Running code with command: {command}")
+        # pdb.set_trace()
         try:
             result = subprocess.run(
                 command,
@@ -172,12 +190,27 @@ class TypeScriptSkillManager:
                 'stderr': result.stderr.strip("\n"),
             }
         except subprocess.CalledProcessError as e:
-                return {
-                    "success": False, 
-                    "reason": f"Skill runner error: {e.stderr}", 
-                    'stdout': result.stdout.strip("\n"),
-                    'stderr': result.stderr.strip("\n"),
-                }
+            # Try to parse JSON error from stdout first (where runCode.ts outputs errors)
+            if e.stdout:
+                try:
+                    error_json = json.loads(e.stdout.strip("\n"))
+                    return {
+                        "success": False,
+                        "reason": error_json.get("error", "Unknown error"),
+                        "trace": error_json.get("trace", ""),
+                        'stdout': e.stdout.strip("\n") if e.stdout else "",
+                        'stderr': e.stderr.strip("\n") if e.stderr else "",
+                    }
+                except json.JSONDecodeError:
+                    pass
+            
+            # Fallback to stderr
+            return {
+                "success": False, 
+                "reason": f"Skill runner error: {e.stderr}", 
+                'stdout': e.stdout.strip("\n") if e.stdout else "",
+                'stderr': e.stderr.strip("\n") if e.stderr else "",
+            }
         except FileNotFoundError:
             return {"success": False, "reason": "Bun command not found. Make sure Bun is installed and in your PATH."}
 
@@ -219,7 +252,7 @@ class TypeScriptSkillManager:
         return file_path
 
     def execute_skill(self, file_path: str, timeout_ms: int = 10000, agent_pubkey: str = None, latest_blockhash: str = None) -> Dict[str, Any]:
-        command = ["bun", "skill_runner/runSkill.ts", file_path, str(timeout_ms)]
+        command = ["bun", "voyager/skill_runner/runSkill.ts", file_path, str(timeout_ms)]
         if agent_pubkey:
             command.append(agent_pubkey)
         if latest_blockhash:
