@@ -51,7 +51,7 @@ This project adapts the groundbreaking [Voyager paper](https://voyager.minedojo.
 
 - Python 3.8+ with [uv](https://github.com/astral-sh/uv)
 - [Bun](https://bun.sh) v1.1.42+
-- [Surfpool](https://github.com/novy4/surfpool) (Solana test environment)
+- [Surfpool](https://github.com/txtx/surfpool) (Solana test environment)
 - OpenRouter API key for LLM access
 
 ### Installation
@@ -62,9 +62,7 @@ git clone <repo-url>
 cd voyager
 
 # Install Python dependencies
-uv pip install -e .
-uv pip install -r requirements.txt
-uv pip install langchain-community
+uv sync --dev
 
 # Install TypeScript dependencies
 cd voyager/skill_runner && bun install
