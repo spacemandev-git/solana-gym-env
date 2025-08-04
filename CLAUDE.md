@@ -4,17 +4,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is Solana Gym, a reinforcement learning environment for teaching AI agents to interact with the Solana blockchain. The project converts the Nvidia Minedojo Voyager experiment to work with a Solana environment called surfpool_env, which creates a local sandbox of Solana mainnet.
+Solana Gym is a reinforcement learning environment for teaching AI agents to interact with the Solana blockchain. It adapts the NVIDIA Voyager paper to work with Solana, using a local validator (surfpool) that simulates mainnet behavior. The project implements skill-based learning where agents generate and execute TypeScript code to explore blockchain protocols.
 
 ## Development Commands
 
-### Running the Environment
+### Python Environment
 
 ```bash
-# All Python commands should use uv run
-uv run python voyager_env.py
-uv run python simple_explorer.py
-uv run python -m pytest tests/
+# All Python commands must use uv run
+uv run python voyager/voyager_clone.py     # Run full Voyager agent
+uv run python voyager/simple_explorer.py   # Run simplified explorer agent
+uv run python voyager_env.py               # Test environment wrapper
+
+# Testing
+uv run python -m pytest tests/             # Run all tests
+uv run python -m pytest tests/test_surfpool_env.py  # Run specific test
+
+# Component testing
+uv run python -c "from voyager.surfpool_env import SurfpoolEnv; env = SurfpoolEnv(); env.reset()"
 ```
 
 ### TypeScript Skill Runner
@@ -27,121 +34,112 @@ cd voyager/skill_runner
 bun install
 
 # Run tests
-bun test
-
-# Run a single test
-bun test tests/single_transaction.test.ts
+bun test                                    # Run all tests
+bun test tests/single_transaction.test.ts  # Run specific test
 
 # Type check
 bunx tsc --noEmit
 
 # Lint
 bunx eslint . --max-warnings 0
-```
 
-### Testing Individual Components
-
-```bash
-# Test the surfpool environment
-uv run python -c "from surfpool_env import SurfpoolEnv; env = SurfpoolEnv(); env.reset()"
-
-# Test skill execution
-cd voyager/skill_runner && bun run runSkill.ts path/to/skill.ts 30000
+# Execute individual skill
+bun run runSkill.ts path/to/skill.ts 30000
 ```
 
 ## Architecture Overview
 
-### Core Components
+The project implements a three-layer architecture for reinforcement learning on Solana:
 
-1. **SurfpoolEnv** (`surfpool_env.py`): Low-level environment managing the Solana test validator
-   - Manages surfpool subprocess lifecycle
-   - Handles raw transaction execution
-   - Provides observation space (wallet balances, block height)
-   - Calculates rewards based on protocol discovery
+### Layer 0: Environment Foundation
 
-2. **SolanaVoyagerEnv** (`voyager_env.py`): High-level Gymnasium wrapper
-   - Skill-based action space (execute skill, generate new skill, inspect library)
-   - LLM integration for skill generation
-   - Transaction fetching from mainnet
-   - Protocol discovery rewards
+**SurfpoolEnv** (`voyager/surfpool_env.py`): Low-level Solana environment
+- Manages surfpool subprocess (local Solana validator)
+- Executes and simulates transactions
+- Tracks wallet balances and blockchain state
+- Calculates rewards based on protocol discovery
 
-3. **SimpleExplorer** (`simple_explorer.py`): Simplified autonomous agent
-   - Uses OpenAI function calling (tool use) for skill execution
-   - Direct OpenRouter API integration
-   - Cleaner message parsing than action.py
+### Layer 1: Gymnasium Interface
 
-4. **TypeScriptSkillManager** (`voyager/skill_manager/ts_skill_manager.py`): Manages TypeScript skills
-   - Skill registration and storage
-   - Execution via Bun subprocess
-   - ChromaDB vector database for skill retrieval
+**SolanaVoyagerEnv** (`voyager_env.py`): Standard RL environment wrapper
+- Provides Gymnasium-compatible interface
+- Skill-based action space (execute, generate, inspect)
+- Integrates LLM for skill generation
+- Fetches real mainnet transactions for learning examples
 
-### Key Directories
+### Layer 2: Agent Systems
 
-- `/voyager/skill_runner/`: Bun runtime for executing TypeScript skills
-- `/voyager/prompts/`: LLM prompt templates
-- `/skills/`: Generated TypeScript skill storage
-- `/ckpt/`: Checkpoints for different runs
-- `/traces/`: Execution traces and rewards
-- `/data/program_ids.csv`: Known Solana program mappings
+**VoyagerClone** (`voyager/voyager_clone.py`): Full Voyager implementation
+- Curriculum agent: Task generation and progression
+- Action agent: Code generation and execution
+- Critic agent: Self-reflection and improvement
 
-## Debugging action.py & parse_ai_message
+**SimpleExplorer** (`voyager/simple_explorer.py`): Streamlined agent (RECOMMENDED)
+- Uses OpenAI function calling API (no regex parsing)
+- Direct OpenRouter integration
+- More robust than action.py's code extraction
 
-### Recent Fixes Applied
+### Supporting Components
 
-1. **babel_generator TypeError** (FIXED)
-   - Issue: `babel_generator(node)` was failing with "this.m[ffid] is not a function"
-   - Fix: Use `babel_generator.default` if it exists, otherwise use `babel_generator` directly
-   - Location: `voyager/agents/action.py:126-127`
+**TypeScriptSkillManager** (`voyager/skill_manager/ts_skill_manager.py`)
+- Skill registration and persistent storage
+- Execution via isolated Bun subprocess
+- ChromaDB vector database for skill retrieval
+- Enforces single-transaction constraint
 
-2. **Assertion syntax error** (FIXED)
-   - Issue: Incorrect assertion syntax using comma instead of `and`
-   - Fix: Changed to proper boolean expression with `and`
-   - Location: `voyager/agents/action.py:149-152`
+### Project Structure
 
-3. **Deprecated langchain imports** (FIXED)
-   - Updated from `langchain.chat_models.openai` to `langchain_openai`
+```
+/voyager/
+├── agents/           # LLM-based agents (curriculum, action, critic)
+├── prompts/          # Templates for LLM prompts
+├── skill_manager/    # TypeScript skill storage and retrieval
+├── skill_runner/     # Bun runtime for executing TypeScript skills
+└── utils/            # Helper utilities
 
-### Current Implementation
+/data/program_ids.csv # Known Solana program mappings
+/skills/              # Generated TypeScript skills (runtime)
+/ckpt/                # Checkpoints for different runs (runtime)
+/traces/              # Execution traces and rewards (runtime)
+```
 
-1. **action.py** uses regex and Babel parsing to extract JavaScript/TypeScript code from AI messages
-   - Located at: `voyager/agents/action.py:99-161`
-   - Fragile parsing with hardcoded patterns
-   - Expects specific function signatures
+## Known Issues and Solutions
 
-2. **parse_ai_message** implementations:
-   - `action.py:99`: Uses Babel to parse JS/TS code blocks
-   - `curriculum.py:145`: Simple line-by-line parsing for tasks
+### action.py Code Parsing (AVOID)
 
-### Recommended Approach
+The `voyager/agents/action.py` module uses fragile regex and Babel parsing to extract code from LLM responses. Common issues:
 
-The **SimpleExplorer** implementation is more robust:
-- Uses OpenAI's structured function calling API
+1. **babel_generator TypeError**: Fixed by checking for `babel_generator.default`
+2. **Assertion syntax errors**: Fixed by using proper `and` operators
+3. **Deprecated imports**: Updated to use `langchain_openai`
+
+**Recommendation**: Use `simple_explorer.py` instead, which leverages OpenAI's function calling API for structured responses without regex parsing.
+
+### SimpleExplorer vs Action.py
+
+**SimpleExplorer advantages** (voyager/simple_explorer.py:127-197):
+- Structured function calling API
 - No regex or code parsing needed
-- Clear separation of actions via tool definitions
-- See `simple_explorer.py:127-197` for implementation
+- More reliable message handling
+- Direct tool use pattern
 
-### Key Differences
+**Action.py limitations** (voyager/agents/action.py:99-161):
+- Fragile regex patterns for code extraction
+- Babel parsing failures on complex code
+- Hardcoded function signature expectations
 
-**action.py approach** (problematic):
-```python
-# Extracts code blocks with regex
-code_pattern = re.compile(r"```(?:javascript|js|typescript|ts)(.*?)```", re.DOTALL)
-# Parses with Babel
-parsed = babel.parse(code)
-```
+## Critical Constraints
 
-**SimpleExplorer approach** (recommended):
-```python
-# Uses structured tool calls
-for tool_meta in response.choices[0].message.tool_calls:
-    function_name = tool_meta.function.name
-    function_args = json.loads(tool_meta.function.arguments)
-```
+1. **Always use `uv run`** for Python commands - the project uses UV package manager
+2. **One transaction per skill** - Enforced in voyager/skill_runner/runSkill.ts for safety
+3. **Local validator only** - Uses surfpool (local Solana test validator) for safe testing
+4. **Prefer SimpleExplorer** - More robust than action.py's regex-based parsing
+5. **Mainnet data available** - Can fetch real transactions for learning examples
 
-## Important Notes
+## Current Development Focus
 
-1. Always use `uv run` for Python commands
-2. The project is transitioning from complex code parsing (action.py) to structured function calling (simple_explorer.py)
-3. Skills are limited to ONE transaction per execution (enforced in runSkill.ts)
-4. The environment uses a local Solana validator (surfpool) for safe testing
-5. Real mainnet transactions can be fetched for learning examples
+From CONTRIBUTING.md:
+- Improving `simple_explorer.py` agent performance
+- Target: >25 rewards in 150 iterations (current: 9)
+- Focus on tool calls and transaction decompilation
+- Keep implementation simple without additional LLM calls

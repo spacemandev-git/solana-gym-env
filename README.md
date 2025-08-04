@@ -62,7 +62,9 @@ git clone <repo-url>
 cd voyager
 
 # Install Python dependencies
-uv sync
+uv pip install -e .
+uv pip install -r requirements.txt
+uv pip install langchain-community
 
 # Install TypeScript dependencies
 cd voyager/skill_runner && bun install
@@ -77,7 +79,10 @@ cp .env.example .env
 
 ```bash
 # Run the main Voyager learning loop
-uv run python voyager/voyager_clone.py
+uv run python -m voyager.voyager_clone
+
+# Or run the simpler explorer (recommended for better reliability)
+uv run python -m voyager.simple_explorer
 
 # View progress (in another terminal)
 python view_progress.py
